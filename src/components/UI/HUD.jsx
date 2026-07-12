@@ -1,18 +1,37 @@
-import { useEffect } from "react";
+import { formatKeyCode } from "../../systems/settings";
 import "./HUD.css";
 
-export function HUD({ locked, onPlay }) {
-  useEffect(() => {
-    const onLock = () => {};
-    document.addEventListener("pointerlockchange", onLock);
-    return () => document.removeEventListener("pointerlockchange", onLock);
-  }, []);
+export function HUD({
+  locked,
+  onPlay,
+  onOpenOptions,
+  rideHint = "",
+  settings,
+}) {
+  const b = settings?.bindings;
+  const padOn = !!settings?.gamepadEnabled;
+  const moveHint = b
+    ? `${formatKeyCode(b.forward)}/${formatKeyCode(b.left)}/${formatKeyCode(b.back)}/${formatKeyCode(b.right)} move`
+    : "WASD move";
+  const sprintHint = b
+    ? `${formatKeyCode(b.sprint)} sprint`
+    : "Shift sprint";
+  const interactHint = b
+    ? `${formatKeyCode(b.interact)} interact`
+    : "E interact";
+  const padHint = padOn ? " · PS4 pad ok" : "";
 
   if (locked) {
     return (
       <div className="hud hud-minimal">
-        <div className="hud-location">Valentine</div>
-        <div className="hud-controls-hint">WASD to move · ESC to release mouse</div>
+        <div className="hud-location">The Ranch</div>
+        <div className="hud-bottom">
+          {rideHint ? <div className="hud-prompt">{rideHint}</div> : null}
+          <div className="hud-controls-hint">
+            {moveHint} · {sprintHint} · {interactHint} · ESC options
+            {padHint}
+          </div>
+        </div>
       </div>
     );
   }
@@ -21,18 +40,32 @@ export function HUD({ locked, onPlay }) {
     <div className="hud hud-overlay">
       <div className="hud-panel">
         <h1 className="hud-title">The Ride</h1>
-        <p className="hud-subtitle">Valentine · Heartlands Territory</p>
+        <p className="hud-subtitle">Heartlands Territory</p>
         <p className="hud-desc">
-          Explore a stylized frontier town inspired by Red Dead Redemption.
-          Walk the main street, visit the saloon, and ride out to the cattle pens.
+          Walk the open range, visit the barn and cabin, and ride the white
+          horse across the flats.
         </p>
         <button type="button" className="hud-play-btn" onClick={onPlay}>
           Click to Play
         </button>
+        <button
+          type="button"
+          className="hud-options-btn"
+          onClick={onOpenOptions}
+        >
+          Options
+        </button>
         <div className="hud-controls">
-          <span>W / A / S / D</span> Move
-          <span>Mouse</span> Look around
-          <span>ESC</span> Menu
+          <span>{b ? formatKeyCode(b.forward) : "W"}…</span> Move
+          <span>{b ? formatKeyCode(b.sprint) : "Shift"}</span> Sprint
+          <span>{b ? formatKeyCode(b.interact) : "E"}</span> Interact
+          <span>ESC</span> Options
+          {padOn && (
+            <>
+              <span>LS/RS</span> Move / Look
+              <span>Options</span> Menu
+            </>
+          )}
         </div>
       </div>
     </div>

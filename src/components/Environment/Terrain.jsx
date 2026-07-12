@@ -2,42 +2,172 @@ import { useMemo } from "react";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
 
-function noise(x, z) {
+/** Map half-extent roughly matches playable bounds (2× original) */
+export const MAP_SIZE = 400;
+
+/**
+ * Sample a closed winding loop of centerline points (XZ).
+ */
+function sampleWindingLoop(baseRadius, pointCount) {
+  const pts = [];
+  for (let i = 0; i < pointCount; i++) {
+    const a = (i / pointCount) * Math.PI * 2;
+    const wind =
+      22 * Math.sin(a * 2.3) +
+      14 * Math.cos(a * 4.1) +
+      8 * Math.sin(a * 6.7 + 0.8) +
+      5 * Math.cos(a * 9.2);
+    const r = baseRadius + wind;
+    pts.push(new THREE.Vector3(Math.cos(a) * r, 0.08, Math.sin(a) * r));
+  }
+  return pts;
+}
+
+/**
+ * Open path through waypoints (smooth Catmull-Rom samples).
+ */
+function sampleOpenPath(waypoints, samplesPerSeg = 12) {
+  const curve = new THREE.CatmullRomCurve3(
+    waypoints.map(([x, z]) => new THREE.Vector3(x, 0.08, z)),
+    false,
+    "catmullrom",
+    0.35
+  );
+  const n = Math.max(8, (waypoints.length - 1) * samplesPerSeg);
+  return curve.getPoints(n);
+}
+
+/**
+ * Build a continuous flat dirt ribbon mesh from a polyline of center points.
+ * Uses averaged side normals so corners join cleanly (no tile gaps).
+ */
+function buildRibbonGeometry(centerPts, halfWidth, closed) {
+  const n = centerPts.length;
+  if (n < 2) return null;
+
+  const count = closed ? n : n;
+  const positions = [];
+  const normals = [];
+  const indices = [];
+
+  // Tangents / side vectors at each point
+  const sides = [];
+  for (let i = 0; i < count; i++) {
+    let prev;
+    let next;
+    if (closed) {
+      prev = centerPts[(i - 1 + n) % n];
+      next = centerPts[(i + 1) % n];
+    } else {
+      prev = centerPts[Math.max(0, i - 1)];
+      next = centerPts[Math.min(n - 1, i + 1)];
+    }
+    const tx = next.x - prev.x;
+    const tz = next.z - prev.z;
+    const len = Math.hypot(tx, tz) || 1;
+    // Perpendicular in XZ (left of travel direction)
+    const sx = -tz / len;
+    const sz = tx / len;
+    sides.push({ x: sx, z: sz });
+  }
+
+  for (let i = 0; i < count; i++) {
+    const p = centerPts[i];
+    const s = sides[i];
+    // Left edge
+    positions.push(
+      p.x + s.x * halfWidth,
+      p.y,
+      p.z + s.z * halfWidth
+    );
+    // Right edge
+    positions.push(
+      p.x - s.x * halfWidth,
+      p.y,
+      p.z - s.z * halfWidth
+    );
+    normals.push(0, 1, 0, 0, 1, 0);
+  }
+
+  const edgeCount = closed ? n : n - 1;
+  for (let i = 0; i < edgeCount; i++) {
+    const i0 = i * 2;
+    const i1 = i0 + 1;
+    const i2 = ((i + 1) % count) * 2;
+    const i3 = i2 + 1;
+    // Two triangles per quad
+    indices.push(i0, i2, i1);
+    indices.push(i1, i2, i3);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3)
+  );
+  geo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geo.setIndex(indices);
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+function DirtRibbon({ points, width = 7, closed = false }) {
+  const geometry = useMemo(
+    () => buildRibbonGeometry(points, width / 2, closed),
+    [points, width, closed]
+  );
+  const material = useMemo(
+    () =>
+      new THREE.MeshToonMaterial({
+        color: COLORS.dirt,
+        side: THREE.DoubleSide,
+      }),
+    []
+  );
+
+  if (!geometry) return null;
+  return <mesh geometry={geometry} material={material} receiveShadow />;
+}
+
+/** Slightly darker edge ribbon for a packed-earth border */
+function DirtRibbonBorder({ points, width = 8.5, closed = false }) {
+  const geometry = useMemo(
+    () => buildRibbonGeometry(points, width / 2, closed),
+    [points, width, closed]
+  );
+  const material = useMemo(
+    () =>
+      new THREE.MeshToonMaterial({
+        color: COLORS.dirtDark,
+        side: THREE.DoubleSide,
+      }),
+    []
+  );
+  if (!geometry) return null;
+  // Slightly lower so main path sits on top
   return (
-    Math.sin(x * 0.04) * Math.cos(z * 0.05) * 2 +
-    Math.sin(x * 0.08 + 1.3) * Math.cos(z * 0.07) * 1 +
-    Math.sin(x * 0.15) * 0.5
+    <mesh
+      geometry={geometry}
+      material={material}
+      position={[0, -0.01, 0]}
+      receiveShadow
+    />
+  );
+}
+
+function PathWithBorder({ points, width, closed }) {
+  return (
+    <group>
+      <DirtRibbonBorder points={points} width={width + 1.8} closed={closed} />
+      <DirtRibbon points={points} width={width} closed={closed} />
+    </group>
   );
 }
 
 export function Terrain() {
   const { geometry, material } = useMemo(() => {
-    const size = 200;
-    const segments = 80;
-    const geo = new THREE.PlaneGeometry(size, size, segments, segments);
+    const geo = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE, 1, 1);
     geo.rotateX(-Math.PI / 2);
-
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const z = pos.getZ(i);
-      let y = noise(x, z);
-
-      // Flatten town center
-      const dist = Math.sqrt(x * x + (z + 10) * (z + 10));
-      if (dist < 35) {
-        y *= Math.max(0, (dist - 15) / 20);
-      }
-
-      // Hills around edges
-      const edgeDist = Math.max(Math.abs(x), Math.abs(z));
-      if (edgeDist > 60) {
-        y += (edgeDist - 60) * 0.15;
-      }
-
-      pos.setY(i, y);
-    }
-    geo.computeVertexNormals();
 
     const grad = document.createElement("canvas");
     grad.width = 2;
@@ -60,53 +190,66 @@ export function Terrain() {
     return { geometry: geo, material: mat };
   }, []);
 
+  const paths = useMemo(() => {
+    const outer = sampleWindingLoop(115, 120);
+    const inner = sampleWindingLoop(72, 96);
+    const spur = sampleOpenPath(
+      [
+        [2, 12],
+        [18, 22],
+        [36, 34],
+        [52, 48],
+        [70, 55],
+        // blend into outer loop vicinity
+        [82, 62],
+      ],
+      14
+    );
+    const cabin = sampleOpenPath(
+      [
+        [0, 6],
+        [-8, 8],
+        [-16, 12],
+        [-22, 14],
+      ],
+      10
+    );
+    // Connector from ranch yard onto outer trail (north-west arc)
+    const ranchToOuter = sampleOpenPath(
+      [
+        [-4, -2],
+        [-20, -18],
+        [-40, -40],
+        [-55, -55],
+        [-70, -70],
+      ],
+      12
+    );
+
+    return [
+      { points: outer, width: 7.5, closed: true },
+      { points: inner, width: 6, closed: true },
+      { points: spur, width: 6, closed: false },
+      { points: cabin, width: 4.5, closed: false },
+      { points: ranchToOuter, width: 5.5, closed: false },
+    ];
+  }, []);
+
   return (
     <group>
       <mesh geometry={geometry} material={material} receiveShadow />
-      <RoadPatch x={0} z={0} width={8} length={70} rotation={0} />
-      <RoadPatch x={-20} z={0} width={6} length={30} rotation={Math.PI / 2} />
-      <RoadPatch x={25} z={-5} width={5} length={25} rotation={Math.PI / 2} />
+      {paths.map((p, i) => (
+        <PathWithBorder
+          key={i}
+          points={p.points}
+          width={p.width}
+          closed={p.closed}
+        />
+      ))}
     </group>
-  );
-}
-
-function RoadPatch({ x, z, width, length, rotation }) {
-  return (
-    <mesh position={[x, 0.08, z]} rotation={[-Math.PI / 2, rotation, 0]} receiveShadow>
-      <planeGeometry args={[width, length]} />
-      <meshToonMaterial color={COLORS.dirt} />
-    </mesh>
   );
 }
 
 export function Mountains() {
-  const peaks = useMemo(
-    () =>
-      [
-        [-70, -60, 18, 30],
-        [-50, -75, 22, 35],
-        [60, -70, 20, 32],
-        [75, -50, 16, 28],
-        [-80, 40, 14, 25],
-        [85, 30, 17, 30],
-      ].map(([x, z, h, w], i) => ({ x, z, h, w, key: i })),
-    []
-  );
-
-  return (
-    <group>
-      {peaks.map(({ x, z, h, w, key }) => (
-        <group key={key} position={[x, h / 2 - 2, z]}>
-          <mesh castShadow>
-            <coneGeometry args={[w, h, 6]} />
-            <meshToonMaterial color={COLORS.mountain} />
-          </mesh>
-          <mesh position={[0, h * 0.25, 0]} castShadow>
-            <coneGeometry args={[w * 0.55, h * 0.35, 6]} />
-            <meshToonMaterial color={COLORS.mountainSnow} />
-          </mesh>
-        </group>
-      ))}
-    </group>
-  );
+  return null;
 }

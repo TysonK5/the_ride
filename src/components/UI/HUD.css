@@ -69,6 +69,28 @@
   box-shadow: 0 6px 24px rgba(240, 192, 64, 0.55);
 }
 
+.hud-options-btn {
+  pointer-events: auto;
+  cursor: pointer;
+  display: block;
+  margin: 0.85rem auto 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.55rem 1.5rem;
+  background: transparent;
+  color: #e8dcc8;
+  border: 1px solid rgba(240, 192, 64, 0.45);
+  border-radius: 6px;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.hud-options-btn:hover {
+  background: rgba(240, 192, 64, 0.12);
+  transform: translateY(-1px);
+}
+
 .hud-controls {
   display: flex;
   gap: 1.5rem;
@@ -97,6 +119,26 @@
   text-transform: uppercase;
   color: rgba(240, 192, 64, 0.85);
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
+.hud-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.hud-prompt {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f0c040;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.85);
+  padding: 0.45rem 1rem;
+  background: rgba(20, 12, 6, 0.55);
+  border: 1px solid rgba(240, 192, 64, 0.45);
+  border-radius: 6px;
 }
 
 .hud-controls-hint {
