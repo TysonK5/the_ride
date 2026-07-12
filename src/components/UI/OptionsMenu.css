@@ -206,6 +206,11 @@
   background: transparent;
 }
 
+.options-btn.small {
+  padding: 0.45rem 0.85rem;
+  font-size: 0.75rem;
+}
+
 .options-bind-btn.gp {
   min-width: 8.5rem;
 }

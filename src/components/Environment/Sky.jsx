@@ -20,12 +20,12 @@ export function Sky() {
         color="#fff8e0"
         castShadow
         shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-140}
-        shadow-camera-right={140}
-        shadow-camera-top={140}
-        shadow-camera-bottom={-140}
+        shadow-camera-left={-220}
+        shadow-camera-right={220}
+        shadow-camera-top={220}
+        shadow-camera-bottom={-220}
         shadow-camera-near={0.5}
-        shadow-camera-far={350}
+        shadow-camera-far={520}
       />
       <hemisphereLight args={["#87ceeb", "#6bc94a", 0.4]} />
     </>

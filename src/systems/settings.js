@@ -25,6 +25,11 @@ export const DEFAULT_SETTINGS = {
   gamepadEnabled: true,
   /** Right-stick look multiplier */
   gamepadLookSensitivity: 1,
+  /** Audio */
+  soundMuted: false,
+  masterVolume: 0.7,
+  sfxVolume: 1,
+  ambientVolume: 0.4,
   bindings: {
     forward: "KeyW",
     back: "KeyS",

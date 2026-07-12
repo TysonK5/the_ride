@@ -1,13 +1,15 @@
 import { TREE_SPOTS } from "../components/Environment/Trees";
+import {
+  getCabinColliders,
+  getCabinYardColliders,
+} from "../components/Town/Buildings";
 
 /** Axis-aligned box on XZ plane: { type:'box', minX, maxX, minZ, maxZ } */
 /** Circle on XZ: { type:'circle', x, z, r } */
 /** Ellipse on XZ: { type:'ellipse', x, z, rx, rz } */
 
 // Barn colliders are dynamic (doors open/close) — see getBarnColliders in Buildings.jsx
-
-// Log cabin ~8x6 at (-22, 14), rotated ~30° — padded circle is robust
-const CABIN = { type: "circle", x: -22, z: 14, r: 5.2 };
+// Cabin walls are hollow boxes — see getCabinColliders in Buildings.jsx
 
 // Hitching posts + barrels
 const PROPS = [
@@ -15,8 +17,8 @@ const PROPS = [
   { type: "circle", x: 3, z: 8, r: 0.45 },
   { type: "circle", x: 10, z: 7, r: 0.5 },
   { type: "circle", x: 11, z: 6.5, r: 0.5 },
-  { type: "circle", x: -20, z: 17, r: 0.5 },
-  { type: "circle", x: -18.5, z: 16.5, r: 0.5 },
+  { type: "circle", x: -26, z: 6, r: 0.5 },
+  { type: "circle", x: -24.5, z: 5, r: 0.5 },
 ];
 
 const TREES = TREE_SPOTS.map(([x, z], i) => ({
@@ -35,7 +37,7 @@ export const LAKE = {
   rz: 18,
 };
 
-const STATIC = [CABIN, ...PROPS, ...TREES, LAKE];
+const STATIC = [...PROPS, ...TREES, LAKE];
 
 function pushOutOfBox(px, pz, r, box) {
   // Expand box by radius, then push to nearest edge if inside
@@ -103,9 +105,24 @@ function pushOutOfEllipse(px, pz, r, e) {
  * `extra` may include boxes or circles (e.g. fence rails, horse).
  * Mutates and returns the same Vector3.
  */
-export function resolveCollisions(position, radius = 0.45, extra = []) {
+export function resolveCollisions(
+  position,
+  radius = 0.45,
+  extra = [],
+  cabinState = null
+) {
   let x = position.x;
   let z = position.z;
+  // Cabin walls + picket fence (door/gate open state)
+  let cabin = [];
+  try {
+    cabin = [
+      ...getCabinColliders(cabinState),
+      ...getCabinYardColliders(cabinState),
+    ];
+  } catch {
+    cabin = [];
+  }
 
   // Iterate twice so stacked overlaps settle
   for (let pass = 0; pass < 2; pass++) {
@@ -115,6 +132,11 @@ export function resolveCollisions(position, radius = 0.45, extra = []) {
       else if (c.type === "circle") out = pushOutOfCircle(x, z, radius, c);
       else if (c.type === "ellipse") out = pushOutOfEllipse(x, z, radius, c);
       else continue;
+      x = out.x;
+      z = out.z;
+    }
+    for (const c of cabin) {
+      const out = pushOutOfBox(x, z, radius, c);
       x = out.x;
       z = out.z;
     }

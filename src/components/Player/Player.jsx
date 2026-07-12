@@ -15,6 +15,10 @@ import {
   distToBarnDoors,
   distToBarnBackDoor,
   BARN_DOOR_RANGE,
+  distToCabinDoor,
+  CABIN_DOOR_RANGE,
+  distToCabinGate,
+  CABIN_GATE_AUTO_RANGE,
 } from "../Town/Buildings";
 import {
   BASE_MOUSE_SENS,
@@ -34,6 +38,38 @@ import {
   getFlowerType,
   HeldFlowerPreview,
 } from "../Environment/Flowers";
+import {
+  createFishingState,
+  canFishHere,
+  clampTargetToLake,
+  defaultTargetFromShore,
+  pickRandomFish,
+  FishingPole,
+  FishingWorldFX,
+  applyFishingPose,
+  TARGET_SPEED,
+  CAST_DURATION,
+  REEL_DURATION,
+  CATCH_SHOW,
+} from "./Fishing";
+import {
+  updateFootsteps,
+  updateHoofsteps,
+  sfxDoorWood,
+  sfxGate,
+  sfxFlowerPick,
+  sfxFlowerPlant,
+  sfxMount,
+  sfxDismount,
+  sfxHorseDrink,
+  sfxFishStart,
+  sfxFishCast,
+  sfxFishSplash,
+  sfxFishBite,
+  sfxFishReel,
+  sfxFishCatch,
+} from "../../systems/audio";
+import { PLAY_HALF } from "../../systems/map";
 
 const MOVE_SPEED = 8;
 const SPRINT_MULT = 2;
@@ -518,6 +554,7 @@ export const Player = forwardRef(function Player(
     rideState,
     gateState,
     barnDoorState,
+    cabinState,
     flowerState,
     onFlowerChange,
     onRideHint,
@@ -538,10 +575,14 @@ export const Player = forwardRef(function Player(
   const pitchRef = useRef(-0.15);
   const keysRef = useRef({});
   const interactPressedRef = useRef(false);
+  const sprintPressedRef = useRef(false);
   // Local state so the hand-held mesh mounts as soon as you pick a flower
   const [heldTypeId, setHeldTypeId] = useState(
     () => flowerState?.heldTypeId ?? null
   );
+  /** Show fishing rod in the right hand */
+  const [fishingPoleOut, setFishingPoleOut] = useState(false);
+  const fishingRef = useRef(createFishingState());
   const lastHintRef = useRef("");
   const walkCycleRef = useRef(0);
   const camDistSmoothRef = useRef(CAMERA_DISTANCE);
@@ -617,7 +658,12 @@ export const Player = forwardRef(function Player(
     const mounted = rideState?.mounted ?? false;
     const anim = mountAnimRef.current;
     const flowerAnim = flowerAnimRef.current;
-    const busy = anim.active || flowerAnim.active || !!rideState?.busy;
+    const fishing = fishingRef.current;
+    const busy =
+      anim.active ||
+      flowerAnim.active ||
+      fishing.active ||
+      !!rideState?.busy;
 
     // Dynamic colliders: barn walls/doors + fence + horse
     const extras = [
@@ -641,6 +687,14 @@ export const Player = forwardRef(function Player(
     const nearBarnBack = !mounted && !busy && barnBackDist <= BARN_DOOR_RANGE;
     const gateDist = distToGate(px, pz);
     const nearGate = !mounted && !busy && gateDist <= GATE_RANGE;
+    const cabinDoorDist = distToCabinDoor(px, pz);
+    const nearCabinDoor =
+      !mounted && !busy && cabinDoorDist <= CABIN_DOOR_RANGE;
+    // Auto picket gate — open when walking (or riding) near it
+    const cabinGateDist = distToCabinGate(px, pz);
+    if (cabinState) {
+      cabinState.gateOpen = cabinGateDist <= CABIN_GATE_AUTO_RANGE;
+    }
     const horseDist = rideState
       ? groupRef.current.position.distanceTo(rideState.position)
       : Infinity;
@@ -661,6 +715,8 @@ export const Player = forwardRef(function Player(
         : null;
     const canPlantHere =
       holdingFlower && !mounted && !busy && !isBlockedPlantSpot(px, pz);
+    const nearFishing =
+      canFishHere(px, pz, mounted, holdingFlower, busy && !fishing.active);
 
     const s = settingsRef.current;
     const bindings = s.bindings;
@@ -689,9 +745,48 @@ export const Player = forwardRef(function Player(
         formatKeyCode(bindings.sprint)
       : formatKeyCode(bindings.sprint);
 
-    // --- Interact: flowers / drink / mount / dismount / doors / gate ---
+    // --- Interact ---
     const interactDown =
       isActionDown(bindings, "interact", keys) || !!gp?.interact;
+    const sprintDown =
+      isActionDown(bindings, "sprint", keys) || !!gp?.sprint;
+
+    // Fishing state machine (works while "busy" with fishing.active)
+    if (interactDown && !interactPressedRef.current && fishing.active) {
+      if (fishing.phase === "aim") {
+        // Cast toward target
+        fishing.phase = "cast";
+        fishing.phaseT = 0;
+        fishing.castFromX = groupRef.current.position.x;
+        fishing.castFromZ = groupRef.current.position.z;
+        fishing.castFromY = 1.6;
+        fishing.bobberX = fishing.castFromX;
+        fishing.bobberZ = fishing.castFromZ;
+        fishing.bobberY = fishing.castFromY;
+        sfxFishCast();
+      } else if (fishing.phase === "bite") {
+        // Reel in on the nibble
+        fishing.phase = "reel";
+        fishing.phaseT = 0;
+        fishing.fish = pickRandomFish();
+        sfxFishReel();
+      } else if (fishing.phase === "catch") {
+        // Dismiss catch and put pole away
+        Object.assign(fishing, createFishingState());
+        setFishingPoleOut(false);
+      }
+    } else if (
+      sprintDown &&
+      !sprintPressedRef.current &&
+      fishing.active &&
+      (fishing.phase === "aim" || fishing.phase === "wait")
+    ) {
+      // Cancel fishing (put rod away)
+      Object.assign(fishing, createFishingState());
+      setFishingPoleOut(false);
+    }
+    sprintPressedRef.current = sprintDown;
+
     if (interactDown && !interactPressedRef.current && !busy && !drinking) {
       if (mounted && rideState) {
         // At shore + stopped + haven't just drunk → drink; otherwise dismount
@@ -700,6 +795,7 @@ export const Player = forwardRef(function Player(
           rideState.drinkTimer = 0;
           rideState.moving = false;
           rideState.sprinting = false;
+          sfxHorseDrink();
         } else {
           rideState.justDrank = false;
           rideState.moving = false;
@@ -709,6 +805,7 @@ export const Player = forwardRef(function Player(
           anim.mode = "dismount";
           anim.t = 0;
           anim.side = -1;
+          sfxDismount();
         }
       } else {
         const acts = [];
@@ -725,6 +822,7 @@ export const Player = forwardRef(function Player(
               flowerAnim.t = 0;
               flowerAnim.didAction = false;
               flowerAnim.typeId = flowerState.heldTypeId;
+              sfxFlowerPlant();
               flowerAnim.plantX = px + Math.sin(yaw) * 0.65;
               flowerAnim.plantZ = pz + Math.cos(yaw) * 0.65;
               flowerAnim.plantRot = Math.random() * Math.PI * 2;
@@ -747,6 +845,7 @@ export const Player = forwardRef(function Player(
               flowerAnim.flowerId = f.id;
               flowerAnim.typeId = f.typeId;
               walkCycleRef.current = 0;
+              sfxFlowerPick();
             },
           });
         }
@@ -756,6 +855,7 @@ export const Player = forwardRef(function Player(
             d: barnDoorDist,
             run: () => {
               barnDoorState.open = !barnDoorState.open;
+              sfxDoorWood();
             },
           });
         }
@@ -764,6 +864,16 @@ export const Player = forwardRef(function Player(
             d: barnBackDist,
             run: () => {
               barnDoorState.backOpen = !barnDoorState.backOpen;
+              sfxDoorWood();
+            },
+          });
+        }
+        if (nearCabinDoor && cabinState) {
+          acts.push({
+            d: cabinDoorDist,
+            run: () => {
+              cabinState.doorOpen = !cabinState.doorOpen;
+              sfxDoorWood();
             },
           });
         }
@@ -772,6 +882,7 @@ export const Player = forwardRef(function Player(
             d: gateDist,
             run: () => {
               gateState.open = !gateState.open;
+              sfxGate();
             },
           });
         }
@@ -794,6 +905,30 @@ export const Player = forwardRef(function Player(
               rideState.moving = false;
               rideState.sprinting = false;
               walkCycleRef.current = 0;
+              sfxMount();
+            },
+          });
+        }
+        if (nearFishing) {
+          acts.push({
+            d: 0.4,
+            run: () => {
+              const t = defaultTargetFromShore(px, pz);
+              fishing.active = true;
+              fishing.phase = "aim";
+              fishing.phaseT = 0;
+              fishing.targetX = t.x;
+              fishing.targetZ = t.z;
+              fishing.bobberX = t.x;
+              fishing.bobberZ = t.z;
+              fishing.bobberY = 0.2;
+              fishing.fish = null;
+              fishing.resultText = "";
+              fishing.waitDuration = 0;
+              groupRef.current.rotation.y = Math.atan2(t.x - px, t.z - pz);
+              walkCycleRef.current = 0;
+              setFishingPoleOut(true);
+              sfxFishStart();
             },
           });
         }
@@ -827,6 +962,22 @@ export const Player = forwardRef(function Player(
           anim.mode === "mount" ? "Mounting…" : "Dismounting…";
       } else if (flowerAnim.active) {
         hint = flowerAnim.mode === "pick" ? "Picking…" : "Planting…";
+      } else if (fishing.active) {
+        if (fishing.phase === "aim") {
+          hint = `${interactKey} cast · move aim · ${sprintKey} cancel`;
+        } else if (fishing.phase === "cast") {
+          hint = "Casting…";
+        } else if (fishing.phase === "wait") {
+          hint = "Waiting for a bite… · " + sprintKey + " cancel";
+        } else if (fishing.phase === "bite") {
+          hint = `${interactKey} to reel in!`;
+        } else if (fishing.phase === "reel") {
+          hint = "Reeling…";
+        } else if (fishing.phase === "catch") {
+          hint = fishing.resultText
+            ? `${fishing.resultText} · ${interactKey} continue`
+            : `${interactKey} continue`;
+        }
       } else if (drinking || rideState?.drinking) {
         hint = "Horse is drinking…";
       } else if (mounted && atShore && !rideState?.justDrank) {
@@ -855,12 +1006,18 @@ export const Player = forwardRef(function Player(
             text: `${interactKey} to pick ${name}`,
           });
         }
+        if (nearFishing) {
+          options.push({
+            d: 0.4,
+            text: `${interactKey} to fish`,
+          });
+        }
         if (nearBarnDoors) {
           options.push({
             d: barnDoorDist,
             text: barnDoorState?.open
-              ? `${interactKey} to close barn doors`
-              : `${interactKey} to open barn doors`,
+              ? `${interactKey} to close front doors`
+              : `${interactKey} to open front doors`,
           });
         }
         if (nearBarnBack) {
@@ -869,6 +1026,14 @@ export const Player = forwardRef(function Player(
             text: barnDoorState?.backOpen
               ? `${interactKey} to close sliding door`
               : `${interactKey} to open sliding door`,
+          });
+        }
+        if (nearCabinDoor) {
+          options.push({
+            d: cabinDoorDist,
+            text: cabinState?.doorOpen
+              ? `${interactKey} to close cabin door`
+              : `${interactKey} to open cabin door`,
           });
         }
         if (nearGate) {
@@ -951,16 +1116,21 @@ export const Player = forwardRef(function Player(
           );
           groupRef.current.position.copy(_animPos);
           groupRef.current.position.y = 0;
-          resolveCollisions(groupRef.current.position, PLAYER_RADIUS, [
-            ...getBarnColliders(barnDoorState),
-            ...getFenceColliders(gateState),
-            {
-              type: "circle",
-              x: rideState.position.x,
-              z: rideState.position.z,
-              r: HORSE_COLLIDER_R,
-            },
-          ]);
+          resolveCollisions(
+            groupRef.current.position,
+            PLAYER_RADIUS,
+            [
+              ...getBarnColliders(barnDoorState),
+              ...getFenceColliders(gateState),
+              {
+                type: "circle",
+                x: rideState.position.x,
+                z: rideState.position.z,
+                r: HORSE_COLLIDER_R,
+              },
+            ],
+            cabinState
+          );
           resetStandingPose(
             bodyRef,
             leftArmRef,
@@ -1070,6 +1240,142 @@ export const Player = forwardRef(function Player(
       return;
     }
 
+    // --- Fishing: lock player, move cast target, cast / wait / reel ---
+    if (fishing.active) {
+      fishing.phaseT += delta;
+
+      _forward.set(
+        -Math.sin(yawRef.current),
+        0,
+        -Math.cos(yawRef.current)
+      );
+      _right.set(Math.cos(yawRef.current), 0, -Math.sin(yawRef.current));
+
+      // Movement steers the aim target over the water (not the player)
+      if (fishing.phase === "aim") {
+        _move.set(0, 0, 0);
+        if (isActionDown(bindings, "forward", keys)) _move.add(_forward);
+        if (isActionDown(bindings, "back", keys)) _move.sub(_forward);
+        if (isActionDown(bindings, "right", keys)) _move.add(_right);
+        if (isActionDown(bindings, "left", keys)) _move.sub(_right);
+        if (gp && (gp.moveX !== 0 || gp.moveZ !== 0)) {
+          _move.addScaledVector(_right, gp.moveX);
+          _move.addScaledVector(_forward, gp.moveZ);
+        }
+        if (_move.lengthSq() > 0) {
+          _move.normalize().multiplyScalar(TARGET_SPEED * delta);
+          const next = clampTargetToLake(
+            fishing.targetX + _move.x,
+            fishing.targetZ + _move.z
+          );
+          fishing.targetX = next.x;
+          fishing.targetZ = next.z;
+          // Face toward aim point
+          groupRef.current.rotation.y = Math.atan2(
+            fishing.targetX - groupRef.current.position.x,
+            fishing.targetZ - groupRef.current.position.z
+          );
+        }
+      }
+
+      if (fishing.phase === "cast") {
+        const t = Math.min(1, fishing.phaseT / CAST_DURATION);
+        const ease = t * t * (3 - 2 * t);
+        fishing.bobberX = THREE.MathUtils.lerp(
+          fishing.castFromX,
+          fishing.targetX,
+          ease
+        );
+        fishing.bobberZ = THREE.MathUtils.lerp(
+          fishing.castFromZ,
+          fishing.targetZ,
+          ease
+        );
+        // Arc through the air
+        fishing.bobberY =
+          THREE.MathUtils.lerp(fishing.castFromY, 0.18, ease) +
+          Math.sin(ease * Math.PI) * 2.2;
+        if (t >= 1) {
+          fishing.phase = "wait";
+          fishing.phaseT = 0;
+          fishing.bobberY = 0.18;
+          fishing.waitDuration = 1.4 + Math.random() * 2.8;
+          sfxFishSplash();
+        }
+      } else if (fishing.phase === "wait") {
+        fishing.bobberY = 0.16 + Math.sin(fishing.phaseT * 3.5) * 0.03;
+        if (fishing.phaseT >= fishing.waitDuration) {
+          fishing.phase = "bite";
+          fishing.phaseT = 0;
+          sfxFishBite();
+        }
+      } else if (fishing.phase === "bite") {
+        // Bobber dunks — player must press interact (handled above)
+        fishing.bobberY = 0.1 + Math.sin(fishing.phaseT * 14) * 0.1;
+        // Missed the bite if too slow
+        if (fishing.phaseT > 2.8) {
+          fishing.phase = "wait";
+          fishing.phaseT = 0;
+          fishing.waitDuration = 1.2 + Math.random() * 2.2;
+        }
+      } else if (fishing.phase === "reel") {
+        const t = Math.min(1, fishing.phaseT / REEL_DURATION);
+        const ease = t * t;
+        const px0 = groupRef.current.position.x;
+        const pz0 = groupRef.current.position.z;
+        fishing.bobberX = THREE.MathUtils.lerp(fishing.targetX, px0, ease);
+        fishing.bobberZ = THREE.MathUtils.lerp(fishing.targetZ, pz0, ease);
+        fishing.bobberY = THREE.MathUtils.lerp(0.15, 1.1, ease);
+        if (t >= 1) {
+          fishing.phase = "catch";
+          fishing.phaseT = 0;
+          const fish = fishing.fish || pickRandomFish();
+          fishing.fish = fish;
+          fishing.resultText = `Caught a ${fish.name}!`;
+          sfxFishCatch();
+        }
+      } else if (fishing.phase === "catch") {
+        if (fishing.phaseT >= CATCH_SHOW) {
+          Object.assign(fishing, createFishingState());
+          setFishingPoleOut(false);
+        }
+      }
+
+      applyFishingPose(
+        bodyRef,
+        leftArmRef,
+        rightArmRef,
+        fishing.phase
+      );
+      // Legs stay planted
+      setLegArticulated(
+        leftLegRef,
+        leftKneeRef,
+        [-0.11, 0.77, 0],
+        [0, 0, 0],
+        0
+      );
+      setLegArticulated(
+        rightLegRef,
+        rightKneeRef,
+        [0.11, 0.77, 0],
+        [0, 0, 0],
+        0
+      );
+
+      updateCamera(
+        camera,
+        scene,
+        groupRef.current,
+        yawRef.current,
+        pitchRef.current,
+        false,
+        delta,
+        camDistSmoothRef
+      );
+      return;
+    }
+
     _forward.set(
       -Math.sin(yawRef.current),
       0,
@@ -1096,6 +1402,17 @@ export const Player = forwardRef(function Player(
     const baseSpeed = mounted ? RIDE_SPEED : MOVE_SPEED;
     const speed = baseSpeed * (sprinting ? SPRINT_MULT : 1);
 
+    // Footsteps / hooves while moving
+    if (mounted) {
+      updateHoofsteps(
+        isMoving && !rideState?.drinking,
+        sprinting,
+        delta
+      );
+    } else {
+      updateFootsteps(isMoving, sprinting, delta);
+    }
+
     if (mounted && rideState) {
       // Can't ride away while drinking
       if (rideState.drinking) {
@@ -1108,9 +1425,9 @@ export const Player = forwardRef(function Player(
           // Axis-separated collision for smoother sliding
           _next.copy(rideState.position);
           _next.x += _move.x;
-          resolveCollisions(_next, HORSE_RADIUS, extras);
+          resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
           _next.z = rideState.position.z + _move.z;
-          resolveCollisions(_next, HORSE_RADIUS, extras);
+          resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
           rideState.position.copy(_next);
           rideState.yaw = Math.atan2(_move.x, _move.z);
           rideState.moving = true;
@@ -1120,10 +1437,18 @@ export const Player = forwardRef(function Player(
         }
       }
 
-      rideState.position.x = THREE.MathUtils.clamp(rideState.position.x, -120, 120);
-      rideState.position.z = THREE.MathUtils.clamp(rideState.position.z, -120, 120);
+      rideState.position.x = THREE.MathUtils.clamp(
+        rideState.position.x,
+        -PLAY_HALF,
+        PLAY_HALF
+      );
+      rideState.position.z = THREE.MathUtils.clamp(
+        rideState.position.z,
+        -PLAY_HALF,
+        PLAY_HALF
+      );
       rideState.position.y = 0;
-      resolveCollisions(rideState.position, HORSE_RADIUS, extras);
+      resolveCollisions(rideState.position, HORSE_RADIUS, extras, cabinState);
 
       groupRef.current.position.set(
         rideState.position.x,
@@ -1151,9 +1476,9 @@ export const Player = forwardRef(function Player(
         // Slide along walls: resolve X then Z
         _next.copy(groupRef.current.position);
         _next.x += _move.x;
-        resolveCollisions(_next, PLAYER_RADIUS, extras);
+        resolveCollisions(_next, PLAYER_RADIUS, extras, cabinState);
         _next.z = groupRef.current.position.z + _move.z;
-        resolveCollisions(_next, PLAYER_RADIUS, extras);
+        resolveCollisions(_next, PLAYER_RADIUS, extras, cabinState);
 
         groupRef.current.position.copy(_next);
         groupRef.current.rotation.y = Math.atan2(_move.x, _move.z);
@@ -1166,16 +1491,21 @@ export const Player = forwardRef(function Player(
 
       groupRef.current.position.x = THREE.MathUtils.clamp(
         groupRef.current.position.x,
-        -120,
-        120
+        -PLAY_HALF,
+        PLAY_HALF
       );
       groupRef.current.position.z = THREE.MathUtils.clamp(
         groupRef.current.position.z,
-        -120,
-        120
+        -PLAY_HALF,
+        PLAY_HALF
       );
       groupRef.current.position.y = 0;
-      resolveCollisions(groupRef.current.position, PLAYER_RADIUS, extras);
+      resolveCollisions(
+        groupRef.current.position,
+        PLAYER_RADIUS,
+        extras,
+        cabinState
+      );
 
       // === Walk / run animation ===
       const swingAmp = sprinting ? 1.05 : 0.6;
@@ -1246,6 +1576,7 @@ export const Player = forwardRef(function Player(
   });
 
   return (
+    <>
     <group
       ref={groupRef}
       position={[0, 0, 8]}
@@ -1332,18 +1663,21 @@ export const Player = forwardRef(function Player(
           </group>
         </group>
 
-        {/* RIGHT ARM */}
+        {/* RIGHT ARM — fishing pole grips here */}
         <group ref={rightArmRef} position={[0.26, 0.33, 0]}>
           <mesh castShadow position={[0, -0.28, 0]}>
             <capsuleGeometry args={[0.055, 0.42, 4, 6]} />
             <meshToonMaterial color="#3a5a8a" />
             <Outlines color={COLORS.outline} thickness={1.5} />
           </mesh>
-          <mesh castShadow position={[0, -0.55, 0]}>
-            <sphereGeometry args={[0.055, 6, 6]} />
-            <meshToonMaterial color="#d4a574" />
-            <Outlines color={COLORS.outline} thickness={1} />
-          </mesh>
+          <group position={[0, -0.55, 0]}>
+            <mesh castShadow>
+              <sphereGeometry args={[0.055, 6, 6]} />
+              <meshToonMaterial color="#d4a574" />
+              <Outlines color={COLORS.outline} thickness={1} />
+            </mesh>
+            {fishingPoleOut && <FishingPole />}
+          </group>
         </group>
       </group>
 
@@ -1400,5 +1734,7 @@ export const Player = forwardRef(function Player(
         </group>
       </group>
     </group>
+    <FishingWorldFX fishingRef={fishingRef} playerGroupRef={groupRef} />
+    </>
   );
 });

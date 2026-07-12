@@ -5,6 +5,7 @@ export function HUD({
   locked,
   onPlay,
   onOpenOptions,
+  onOpenMapEditor,
   rideHint = "",
   settings,
 }) {
@@ -55,6 +56,15 @@ export function HUD({
         >
           Options
         </button>
+        {onOpenMapEditor && (
+          <button
+            type="button"
+            className="hud-options-btn"
+            onClick={onOpenMapEditor}
+          >
+            Map Editor
+          </button>
+        )}
         <div className="hud-controls">
           <span>{b ? formatKeyCode(b.forward) : "W"}…</span> Move
           <span>{b ? formatKeyCode(b.sprint) : "Shift"}</span> Sprint

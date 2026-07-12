@@ -48,8 +48,8 @@ export function Props() {
       {/* Barrels near barn & cabin */}
       <Barrel position={[10, 0, 7]} />
       <Barrel position={[11, 0, 6.5]} rotation={0.5} />
-      <Barrel position={[-20, 0, 17]} rotation={1.1} />
-      <Barrel position={[-18.5, 0, 16.5]} rotation={0.3} />
+      <Barrel position={[-26, 0, 6]} rotation={1.1} />
+      <Barrel position={[-24.5, 0, 5]} rotation={0.3} />
     </group>
   );
 }

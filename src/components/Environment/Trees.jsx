@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import { Outlines } from "@react-three/drei";
 import { COLORS } from "../../materials/colors";
+import { isNearRidingPath, loadPaths } from "../../systems/paths";
+import { isInCabinHomestead } from "../Town/Buildings";
 
 /** Keep in sync with LAKE in systems/colliders.js (avoid circular import) */
 const LAKE = { x: 0, z: -38, rx: 28, rz: 18 };
@@ -22,13 +24,17 @@ const EXTRA_TREE_SPOTS = [
   [60, 8], [-60, 5], [25, 40], [-48, 40], [38, 35],
 ];
 
-/** Outer belt for the 2× map (keeps the horizon from feeling empty) */
+/** Mid-range trees on the expanded flats */
 const OUTER_TREE_SPOTS = [
   [90, 40], [100, -30], [85, -70], [70, 95], [110, 20],
   [-90, 50], [-100, -40], [-85, 80], [-70, -95], [-110, 10],
   [40, 110], [-40, 105], [20, -110], [-30, -100], [55, 100],
   [95, 70], [-95, -70], [0, 115], [0, -115], [120, 0],
   [-120, 0], [80, -90], [-80, 90], [100, 100], [-100, -100],
+  [140, 40], [150, -60], [-140, 55], [-155, -30], [60, 150],
+  [-50, 160], [30, -155], [-70, -150], [170, 0], [-170, 20],
+  [130, 130], [-130, 130], [130, -130], [-130, -130], [0, 175],
+  [0, -175], [175, 80], [-175, -80], [90, -160], [-90, 160],
 ];
 
 /** Margin so trunks sit off the shore, not in water */
@@ -57,21 +63,50 @@ function spotBehindPond(i) {
   return [x, z];
 }
 
-/** All spots, with any pond/shore trees relocated behind the lake */
+/** True if tree would sit on lake, path, or cabin yard */
+function treeSpotBlocked(x, z, paths) {
+  return (
+    isInOrNearLake(x, z) ||
+    isNearRidingPath(x, z, paths) ||
+    isInCabinHomestead(x, z, 3)
+  );
+}
+
+/** Push a tree off dirt trails, cabin yard, and lake. */
+function clearOfBlockedAreas(x, z, i, paths) {
+  let px = x;
+  let pz = z;
+  for (let attempt = 0; attempt < 56; attempt++) {
+    if (!treeSpotBlocked(px, pz, paths)) {
+      return [px, pz];
+    }
+    // Spiral outward from original spot
+    const a = rand(i, attempt + 30) * Math.PI * 2;
+    const r = 6 + attempt * 2.4 + rand(i, attempt + 40) * 4;
+    px = x + Math.cos(a) * r;
+    pz = z + Math.sin(a) * r;
+  }
+  // Last resort: park behind the pond (also cleared if needed)
+  const fallback = spotBehindPond(i + 99);
+  if (!treeSpotBlocked(fallback[0], fallback[1], paths)) return fallback;
+  return [fallback[0] - 40, fallback[1]];
+}
+
+/** All spots, cleared of lake, trails, and cabin homestead */
 function buildTreeSpots() {
+  const paths = loadPaths();
   const raw = [...BASE_TREE_SPOTS, ...EXTRA_TREE_SPOTS, ...OUTER_TREE_SPOTS];
   const kept = [];
   let relocateIndex = 0;
 
-  for (const [x, z] of raw) {
-    if (isInOrNearLake(x, z)) {
-      kept.push(spotBehindPond(relocateIndex++));
-    } else {
-      kept.push([x, z]);
+  for (let i = 0; i < raw.length; i++) {
+    let [x, z] = raw[i];
+    if (isInOrNearLake(x, z) || isInCabinHomestead(x, z, 3)) {
+      [x, z] = spotBehindPond(relocateIndex++);
     }
+    kept.push(clearOfBlockedAreas(x, z, i, paths));
   }
 
-  // Ensure relocated spots don't still collide (shouldn't) and aren't duplicated too tightly
   return kept;
 }
 

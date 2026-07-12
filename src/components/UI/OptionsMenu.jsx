@@ -11,6 +11,7 @@ import {
   formatGamepadCode,
   gamepadConnectionLabel,
 } from "../../systems/gamepad";
+import { setAudioSettings, sfxUIClick } from "../../systems/audio";
 import "./OptionsMenu.css";
 
 /** Short labels for action tags drawn on the controller diagram */
@@ -28,6 +29,7 @@ export function OptionsMenu({
   onChange,
   onResume,
   onCloseToTitle,
+  onOpenMapEditor,
   showResume = true,
 }) {
   /** 'kb' | 'gp' listening mode, or null */
@@ -50,6 +52,12 @@ export function OptionsMenu({
       }
       onChange(next);
       saveSettings(next);
+      setAudioSettings({
+        muted: next.soundMuted,
+        masterVolume: next.masterVolume,
+        sfxVolume: next.sfxVolume,
+        ambientVolume: next.ambientVolume,
+      });
     },
     [settings, onChange]
   );
@@ -226,6 +234,83 @@ export function OptionsMenu({
               onChange={(e) => update({ invertLookX: e.target.checked })}
             />
           </label>
+        </section>
+
+        <section className="options-section">
+          <h3 className="options-section-title">Audio</h3>
+          <label className="options-row options-check">
+            <span>Mute all sound</span>
+            <input
+              type="checkbox"
+              checked={!!settings.soundMuted}
+              onChange={(e) => update({ soundMuted: e.target.checked })}
+            />
+          </label>
+          <label className="options-row">
+            <span>Master volume</span>
+            <div className="options-slider-wrap">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.masterVolume ?? 0.7}
+                disabled={!!settings.soundMuted}
+                onChange={(e) =>
+                  update({ masterVolume: Number(e.target.value) })
+                }
+              />
+              <span className="options-value">
+                {Math.round((settings.masterVolume ?? 0.7) * 100)}%
+              </span>
+            </div>
+          </label>
+          <label className="options-row">
+            <span>Effects</span>
+            <div className="options-slider-wrap">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.sfxVolume ?? 1}
+                disabled={!!settings.soundMuted}
+                onChange={(e) => update({ sfxVolume: Number(e.target.value) })}
+              />
+              <span className="options-value">
+                {Math.round((settings.sfxVolume ?? 1) * 100)}%
+              </span>
+            </div>
+          </label>
+          <label className="options-row">
+            <span>Ambience</span>
+            <div className="options-slider-wrap">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.ambientVolume ?? 0.4}
+                disabled={!!settings.soundMuted}
+                onChange={(e) =>
+                  update({ ambientVolume: Number(e.target.value) })
+                }
+              />
+              <span className="options-value">
+                {Math.round((settings.ambientVolume ?? 0.4) * 100)}%
+              </span>
+            </div>
+          </label>
+          <button
+            type="button"
+            className="options-btn small"
+            style={{ width: "100%", marginTop: "0.25rem" }}
+            onClick={() => {
+              sfxUIClick();
+            }}
+          >
+            Test sound
+          </button>
         </section>
 
         <section className="options-section">
@@ -487,6 +572,23 @@ export function OptionsMenu({
               </p>
             )}
           </div>
+        </section>
+
+        <section className="options-section">
+          <h3 className="options-section-title">Map</h3>
+          <p className="options-hint">
+            Drag dirt-path waypoints on a top-down map and save them for this
+            browser.
+          </p>
+          <button
+            type="button"
+            className="options-btn primary"
+            style={{ width: "100%" }}
+            onClick={onOpenMapEditor}
+            disabled={!onOpenMapEditor}
+          >
+            Open map editor
+          </button>
         </section>
 
         <div className="options-actions">

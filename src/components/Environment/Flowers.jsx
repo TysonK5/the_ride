@@ -39,8 +39,8 @@ function rand(i, salt = 0) {
 export function isBlockedPlantSpot(x, z) {
   // Barn W=18 D=12 at origin — pad a little
   if (Math.abs(x) < 10 && Math.abs(z) < 7.5) return true;
-  // Cabin at (-22, 14), ~r 6
-  if (Math.hypot(x + 22, z - 14) < 6.5) return true;
+  // Cabin homestead + yard left of barn (center ~ -32.5, 0)
+  if (Math.hypot(x + 32.5, z - 0) < 16) return true;
   // Fence pen rough box
   if (x > 8.5 && x < 32 && z > -7 && z < 7) return true;
   // Lake
@@ -52,10 +52,10 @@ function spawnPosition(i) {
   // Prefer flats around ranch, avoid blocked zones
   for (let attempt = 0; attempt < 40; attempt++) {
     const a = rand(i, attempt) * Math.PI * 2;
-    const r = 12 + rand(i, attempt + 50) * 100;
-    const x = Math.cos(a) * r + (rand(i, attempt + 3) - 0.5) * 20;
-    const z = Math.sin(a) * r + (rand(i, attempt + 7) - 0.5) * 20;
-    if (!isBlockedPlantSpot(x, z) && Math.abs(x) < 115 && Math.abs(z) < 115) {
+    const r = 12 + rand(i, attempt + 50) * 170;
+    const x = Math.cos(a) * r + (rand(i, attempt + 3) - 0.5) * 30;
+    const z = Math.sin(a) * r + (rand(i, attempt + 7) - 0.5) * 30;
+    if (!isBlockedPlantSpot(x, z) && Math.abs(x) < 190 && Math.abs(z) < 190) {
       return { x, z };
     }
   }

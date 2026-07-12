@@ -1,39 +1,27 @@
 import { useMemo } from "react";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
+import { loadPaths } from "../../systems/paths";
+import { MAP_SIZE } from "../../systems/map";
+import { MapBorders } from "./MapBorders";
 
-/** Map half-extent roughly matches playable bounds (2× original) */
-export const MAP_SIZE = 400;
-
-/**
- * Sample a closed winding loop of centerline points (XZ).
- */
-function sampleWindingLoop(baseRadius, pointCount) {
-  const pts = [];
-  for (let i = 0; i < pointCount; i++) {
-    const a = (i / pointCount) * Math.PI * 2;
-    const wind =
-      22 * Math.sin(a * 2.3) +
-      14 * Math.cos(a * 4.1) +
-      8 * Math.sin(a * 6.7 + 0.8) +
-      5 * Math.cos(a * 9.2);
-    const r = baseRadius + wind;
-    pts.push(new THREE.Vector3(Math.cos(a) * r, 0.08, Math.sin(a) * r));
-  }
-  return pts;
-}
+export { MAP_SIZE };
 
 /**
- * Open path through waypoints (smooth Catmull-Rom samples).
+ * Smooth Catmull-Rom samples from editable [x,z] waypoints.
  */
-function sampleOpenPath(waypoints, samplesPerSeg = 12) {
+function samplePathPoints(waypoints, closed, samplesPerSeg = 12) {
+  if (!waypoints || waypoints.length < 2) return [];
   const curve = new THREE.CatmullRomCurve3(
     waypoints.map(([x, z]) => new THREE.Vector3(x, 0.08, z)),
-    false,
+    !!closed,
     "catmullrom",
     0.35
   );
-  const n = Math.max(8, (waypoints.length - 1) * samplesPerSeg);
+  const segs = closed
+    ? Math.max(waypoints.length, 3)
+    : Math.max(waypoints.length - 1, 1);
+  const n = Math.max(8, segs * samplesPerSeg);
   return curve.getPoints(n);
 }
 
@@ -50,7 +38,6 @@ function buildRibbonGeometry(centerPts, halfWidth, closed) {
   const normals = [];
   const indices = [];
 
-  // Tangents / side vectors at each point
   const sides = [];
   for (let i = 0; i < count; i++) {
     let prev;
@@ -65,7 +52,6 @@ function buildRibbonGeometry(centerPts, halfWidth, closed) {
     const tx = next.x - prev.x;
     const tz = next.z - prev.z;
     const len = Math.hypot(tx, tz) || 1;
-    // Perpendicular in XZ (left of travel direction)
     const sx = -tz / len;
     const sz = tx / len;
     sides.push({ x: sx, z: sz });
@@ -74,18 +60,8 @@ function buildRibbonGeometry(centerPts, halfWidth, closed) {
   for (let i = 0; i < count; i++) {
     const p = centerPts[i];
     const s = sides[i];
-    // Left edge
-    positions.push(
-      p.x + s.x * halfWidth,
-      p.y,
-      p.z + s.z * halfWidth
-    );
-    // Right edge
-    positions.push(
-      p.x - s.x * halfWidth,
-      p.y,
-      p.z - s.z * halfWidth
-    );
+    positions.push(p.x + s.x * halfWidth, p.y, p.z + s.z * halfWidth);
+    positions.push(p.x - s.x * halfWidth, p.y, p.z - s.z * halfWidth);
     normals.push(0, 1, 0, 0, 1, 0);
   }
 
@@ -95,7 +71,6 @@ function buildRibbonGeometry(centerPts, halfWidth, closed) {
     const i1 = i0 + 1;
     const i2 = ((i + 1) % count) * 2;
     const i3 = i2 + 1;
-    // Two triangles per quad
     indices.push(i0, i2, i1);
     indices.push(i1, i2, i3);
   }
@@ -129,7 +104,6 @@ function DirtRibbon({ points, width = 7, closed = false }) {
   return <mesh geometry={geometry} material={material} receiveShadow />;
 }
 
-/** Slightly darker edge ribbon for a packed-earth border */
 function DirtRibbonBorder({ points, width = 8.5, closed = false }) {
   const geometry = useMemo(
     () => buildRibbonGeometry(points, width / 2, closed),
@@ -144,7 +118,6 @@ function DirtRibbonBorder({ points, width = 8.5, closed = false }) {
     []
   );
   if (!geometry) return null;
-  // Slightly lower so main path sits on top
   return (
     <mesh
       geometry={geometry}
@@ -164,7 +137,11 @@ function PathWithBorder({ points, width, closed }) {
   );
 }
 
-export function Terrain() {
+/**
+ * @param {{ pathDefs?: import('../../systems/paths').DEFAULT_PATHS }} props
+ * pathDefs: editable path list from Map Editor (falls back to localStorage defaults)
+ */
+export function Terrain({ pathDefs }) {
   const { geometry, material } = useMemo(() => {
     const geo = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE, 1, 1);
     geo.rotateX(-Math.PI / 2);
@@ -190,57 +167,23 @@ export function Terrain() {
     return { geometry: geo, material: mat };
   }, []);
 
-  const paths = useMemo(() => {
-    const outer = sampleWindingLoop(115, 120);
-    const inner = sampleWindingLoop(72, 96);
-    const spur = sampleOpenPath(
-      [
-        [2, 12],
-        [18, 22],
-        [36, 34],
-        [52, 48],
-        [70, 55],
-        // blend into outer loop vicinity
-        [82, 62],
-      ],
-      14
-    );
-    const cabin = sampleOpenPath(
-      [
-        [0, 6],
-        [-8, 8],
-        [-16, 12],
-        [-22, 14],
-      ],
-      10
-    );
-    // Connector from ranch yard onto outer trail (north-west arc)
-    const ranchToOuter = sampleOpenPath(
-      [
-        [-4, -2],
-        [-20, -18],
-        [-40, -40],
-        [-55, -55],
-        [-70, -70],
-      ],
-      12
-    );
+  const defs = pathDefs ?? loadPaths();
 
-    return [
-      { points: outer, width: 7.5, closed: true },
-      { points: inner, width: 6, closed: true },
-      { points: spur, width: 6, closed: false },
-      { points: cabin, width: 4.5, closed: false },
-      { points: ranchToOuter, width: 5.5, closed: false },
-    ];
-  }, []);
+  const paths = useMemo(() => {
+    return defs.map((p) => ({
+      id: p.id,
+      width: p.width,
+      closed: !!p.closed,
+      points: samplePathPoints(p.waypoints, p.closed, p.closed ? 10 : 12),
+    }));
+  }, [defs]);
 
   return (
     <group>
       <mesh geometry={geometry} material={material} receiveShadow />
-      {paths.map((p, i) => (
+      {paths.map((p) => (
         <PathWithBorder
-          key={i}
+          key={p.id}
           points={p.points}
           width={p.width}
           closed={p.closed}
@@ -250,6 +193,7 @@ export function Terrain() {
   );
 }
 
+/** World border: forest belt + cliffs (was empty placeholder) */
 export function Mountains() {
-  return null;
+  return <MapBorders />;
 }

@@ -19,7 +19,7 @@ const BIRD_MODELS = [
 
 const FLY_MIN_Y = 6;
 const FLY_MAX_Y = 22;
-const WORLD_R = 120;
+const WORLD_R = 190;
 const FLY_SPEED = 7;
 const LAND_SPEED = 5;
 
@@ -80,7 +80,8 @@ function FlappingBird({ model, bird }) {
   const s = model.scale * 0.38;
   return (
     <group scale={s}>
-      <mesh castShadow>
+      {/* No castShadow — flying birds left smear tracks on the ground */}
+      <mesh>
         <sphereGeometry args={[0.45, 6, 5]} />
         <meshToonMaterial color={model.body} />
         <Outlines color={COLORS.outline} thickness={1} />
@@ -89,7 +90,7 @@ function FlappingBird({ model, bird }) {
         <sphereGeometry args={[0.35, 5, 4]} />
         <meshToonMaterial color={model.belly} />
       </mesh>
-      <mesh position={[0, 0.2, 0.4]} castShadow>
+      <mesh position={[0, 0.2, 0.4]}>
         <sphereGeometry args={[0.28, 6, 5]} />
         <meshToonMaterial color={model.body} />
         <Outlines color={COLORS.outline} thickness={1} />
@@ -106,12 +107,12 @@ function FlappingBird({ model, bird }) {
         <boxGeometry args={[0.2, 0.08, 0.4]} />
         <meshToonMaterial color={model.wing} />
       </mesh>
-      <mesh ref={wingL} position={[-0.4, 0.05, 0]} castShadow>
+      <mesh ref={wingL} position={[-0.4, 0.05, 0]}>
         <boxGeometry args={[0.7, 0.08, 0.35]} />
         <meshToonMaterial color={model.wing} />
         <Outlines color={COLORS.outline} thickness={0.8} />
       </mesh>
-      <mesh ref={wingR} position={[0.4, 0.05, 0]} castShadow>
+      <mesh ref={wingR} position={[0.4, 0.05, 0]}>
         <boxGeometry args={[0.7, 0.08, 0.35]} />
         <meshToonMaterial color={model.wing} />
         <Outlines color={COLORS.outline} thickness={0.8} />
@@ -133,8 +134,8 @@ function BirdActor({ bird, landingSpots }) {
       b.circleAngle += b.circleSpeed * dt;
       b.circleCenter.x += Math.sin(b.circleAngle * 0.1) * 2 * dt;
       b.circleCenter.z += Math.cos(b.circleAngle * 0.13) * 2 * dt;
-      b.circleCenter.x = THREE.MathUtils.clamp(b.circleCenter.x, -90, 90);
-      b.circleCenter.z = THREE.MathUtils.clamp(b.circleCenter.z, -90, 90);
+      b.circleCenter.x = THREE.MathUtils.clamp(b.circleCenter.x, -160, 160);
+      b.circleCenter.z = THREE.MathUtils.clamp(b.circleCenter.z, -160, 160);
 
       const tx = b.circleCenter.x + Math.cos(b.circleAngle) * b.circleR;
       const tz = b.circleCenter.z + Math.sin(b.circleAngle) * b.circleR;
