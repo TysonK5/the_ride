@@ -24,8 +24,7 @@ import {
   BARN_DOOR_RANGE,
   distToCabinDoor,
   CABIN_DOOR_RANGE,
-  distToCabinGate,
-  CABIN_GATE_AUTO_RANGE,
+  tryPushCabinYardGates,
 } from "../Town/Buildings";
 import {
   BASE_MOUSE_SENS,
@@ -603,6 +602,7 @@ export const Player = forwardRef(function Player(
   /** Show fishing rod in the right hand */
   const [fishingPoleOut, setFishingPoleOut] = useState(false);
   const fishingRef = useRef(createFishingState());
+  const fishingPoleTipRef = useRef();
   const lastHintRef = useRef("");
   const walkCycleRef = useRef(0);
   const camDistSmoothRef = useRef(CAMERA_DISTANCE);
@@ -721,11 +721,6 @@ export const Player = forwardRef(function Player(
     const cabinDoorDist = distToCabinDoor(px, pz);
     const nearCabinDoor =
       !mounted && !busy && cabinDoorDist <= CABIN_DOOR_RANGE;
-    // Auto picket gate — open when walking (or riding) near it
-    const cabinGateDist = distToCabinGate(px, pz);
-    if (cabinState) {
-      cabinState.gateOpen = cabinGateDist <= CABIN_GATE_AUTO_RANGE;
-    }
     // Nearest free mount (horse or unicorn)
     let nearMount = null;
     let nearMountDist = Infinity;
@@ -1572,25 +1567,8 @@ export const Player = forwardRef(function Player(
         activeRide.airborne = false;
       } else {
         activeRide.sprinting = sprinting && isMoving;
-        if (isMoving) {
-          const airMult = activeRide.airborne ? 1.15 : 1;
-          _move.normalize().multiplyScalar(speed * airMult * delta);
-          // Axis-separated collision for smoother sliding (XZ only)
-          _next.copy(activeRide.position);
-          _next.x += _move.x;
-          resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
-          _next.z = activeRide.position.z + _move.z;
-          resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
-          _next.y = activeRide.position.y;
-          activeRide.position.copy(_next);
-          activeRide.yaw = Math.atan2(_move.x, _move.z);
-          activeRide.moving = true;
-        } else {
-          activeRide.moving = false;
-          activeRide.sprinting = false;
-        }
 
-        // Unicorn flight — free of ground clamp while airborne
+        // Unicorn flight first so airborne status is current for horizontal move
         if (isUnicorn) {
           const up = flyUpDown;
           const down = flyDownDown;
@@ -1612,6 +1590,30 @@ export const Player = forwardRef(function Player(
         } else {
           activeRide.position.y = 0;
           activeRide.airborne = false;
+        }
+
+        if (isMoving) {
+          const airMult = activeRide.airborne ? 1.15 : 1;
+          _move.normalize().multiplyScalar(speed * airMult * delta);
+          _next.copy(activeRide.position);
+          if (activeRide.airborne) {
+            // Fly over fences, buildings, pond — no XZ colliders
+            _next.x += _move.x;
+            _next.z += _move.z;
+          } else {
+            // Axis-separated collision for smoother sliding (XZ only)
+            _next.x += _move.x;
+            resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
+            _next.z = activeRide.position.z + _move.z;
+            resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
+          }
+          _next.y = activeRide.position.y;
+          activeRide.position.copy(_next);
+          activeRide.yaw = Math.atan2(_move.x, _move.z);
+          activeRide.moving = true;
+        } else {
+          activeRide.moving = false;
+          activeRide.sprinting = false;
         }
       }
 
@@ -1749,7 +1751,7 @@ export const Player = forwardRef(function Player(
       }
     }
 
-    // Share position with follower pets (cat, etc.)
+    // Share position with follower pets (cat, dog, etc.)
     if (playerTrack) {
       playerTrack.position.copy(groupRef.current.position);
       playerTrack.yaw = groupRef.current.rotation.y;
@@ -1757,10 +1759,15 @@ export const Player = forwardRef(function Player(
         ? !!(activeRide?.moving || activeRide?.airborne)
         : isMoving;
       playerTrack.mounted = mounted;
+      playerTrack.airborne = !!(
+        mounted &&
+        activeRide?.name === "unicorn" &&
+        activeRide?.airborne
+      );
     }
 
-    // Barn pen gate — swings open/closed with push direction (E still toggles)
-    if (gateState && !busy) {
+    // Gates — open/close with push direction (barn + cabin/garden pickets)
+    if ((gateState || cabinState) && !busy) {
       const gx =
         mounted && activeRide
           ? activeRide.position.x
@@ -1774,21 +1781,30 @@ export const Player = forwardRef(function Player(
       if (!prev.primed) {
         gatePushPrevRef.current = { x: gx, z: gz, primed: true };
       } else {
-        // Prefer live input displacement when blocked by the closed leaf
-        // so direction still reads while walking into the collider
+        // Prefer live input when blocked so direction still reads
         let velX = gx - prev.x;
         let velZ = gz - prev.z;
         if (gMoving && Math.hypot(velX, velZ) < 0.0005) {
-          // _move is world wish-dir (already scaled) from this frame
           const wishLen = Math.hypot(_move.x, _move.z);
           if (wishLen > 0.0001) {
             velX = _move.x;
             velZ = _move.z;
           }
         }
-        if (tryPushBarnGate(gx, gz, velX, velZ, gMoving, gateState)) {
-          sfxGate();
+        let gateSfx = false;
+        if (
+          gateState &&
+          tryPushBarnGate(gx, gz, velX, velZ, gMoving, gateState)
+        ) {
+          gateSfx = true;
         }
+        if (
+          cabinState &&
+          tryPushCabinYardGates(gx, gz, velX, velZ, gMoving, cabinState)
+        ) {
+          gateSfx = true;
+        }
+        if (gateSfx) sfxGate();
         gatePushPrevRef.current = { x: gx, z: gz, primed: true };
       }
     }
@@ -1907,7 +1923,7 @@ export const Player = forwardRef(function Player(
               <meshToonMaterial color="#d4a574" />
               <Outlines color={COLORS.outline} thickness={1} />
             </mesh>
-            {fishingPoleOut && <FishingPole />}
+            {fishingPoleOut && <FishingPole tipRef={fishingPoleTipRef} />}
           </group>
         </group>
       </group>
@@ -1965,7 +1981,11 @@ export const Player = forwardRef(function Player(
         </group>
       </group>
     </group>
-    <FishingWorldFX fishingRef={fishingRef} playerGroupRef={groupRef} />
+    <FishingWorldFX
+      fishingRef={fishingRef}
+      playerGroupRef={groupRef}
+      poleTipRef={fishingPoleTipRef}
+    />
     </>
   );
 });

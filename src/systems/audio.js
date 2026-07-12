@@ -334,6 +334,85 @@ export function sfxDismount() {
   });
 }
 
+/** Low cow moo */
+export function sfxMoo() {
+  playTone({
+    type: "sawtooth",
+    freq: 140,
+    freqEnd: 95,
+    duration: 0.55,
+    gain: 0.09,
+    attack: 0.04,
+    decay: 0.5,
+  });
+  setTimeout(() => {
+    playTone({
+      type: "triangle",
+      freq: 110,
+      freqEnd: 75,
+      duration: 0.45,
+      gain: 0.08,
+      attack: 0.03,
+      decay: 0.4,
+    });
+  }, 180);
+  playNoise({
+    duration: 0.4,
+    gain: 0.05,
+    filterType: "lowpass",
+    frequency: 280,
+    Q: 0.6,
+    attack: 0.05,
+    decay: 0.35,
+  });
+}
+
+/** Soft low "fart" when the cow poops */
+export function sfxFart() {
+  // Fluttery low buzz
+  playTone({
+    type: "sawtooth",
+    freq: 95,
+    freqEnd: 55,
+    duration: 0.28,
+    gain: 0.11,
+    attack: 0.01,
+    decay: 0.26,
+  });
+  setTimeout(() => {
+    playTone({
+      type: "square",
+      freq: 70,
+      freqEnd: 40,
+      duration: 0.18,
+      gain: 0.07,
+      attack: 0.005,
+      decay: 0.16,
+    });
+  }, 90);
+  // Airy noise tail
+  playNoise({
+    duration: 0.35,
+    gain: 0.1,
+    filterType: "lowpass",
+    frequency: 220,
+    Q: 0.8,
+    attack: 0.01,
+    decay: 0.32,
+  });
+  setTimeout(() => {
+    playNoise({
+      duration: 0.2,
+      gain: 0.06,
+      filterType: "bandpass",
+      frequency: 160,
+      Q: 1.2,
+      attack: 0.005,
+      decay: 0.18,
+    });
+  }, 120);
+}
+
 /** Two-tone whistle to call a horse */
 export function sfxWhistle() {
   // Rising first note

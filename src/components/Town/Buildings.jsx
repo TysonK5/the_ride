@@ -24,6 +24,16 @@ export const BACK_DOOR_H = 4.4;
 /** How far the rear slide door travels when open */
 export const BACK_DOOR_SLIDE = BACK_DOOR_W + 0.15;
 
+/**
+ * Always-open passage on the barn's right wall into the horse pen.
+ * No door leaf — just a doorway gap in the wall.
+ */
+export const PEN_DOOR_HALF = 3.0; // full opening ~6.0 (widened)
+export const PEN_DOOR_W = PEN_DOOR_HALF * 2;
+export const PEN_DOOR_H = 3.7;
+/** Local Z center of the pen doorway (mid aisle → pen) */
+export const PEN_DOOR_Z = 0;
+
 /** 3 open horse stalls along the left wall (no doors) */
 export const STALL_COUNT = 3;
 export const STALL_DEPTH = 3.6; // how far into the barn from left wall
@@ -85,8 +95,21 @@ export function getBarnColliders(doorState) {
     },
     // Left wall
     { type: "box", minX: -hw - t, maxX: -hw + t, minZ: -hd, maxZ: hd },
-    // Right wall
-    { type: "box", minX: hw - t, maxX: hw + t, minZ: -hd, maxZ: hd },
+    // Right wall — gap for always-open pen doorway (no door leaf)
+    {
+      type: "box",
+      minX: hw - t,
+      maxX: hw + t,
+      minZ: -hd,
+      maxZ: PEN_DOOR_Z - PEN_DOOR_HALF,
+    },
+    {
+      type: "box",
+      minX: hw - t,
+      maxX: hw + t,
+      minZ: PEN_DOOR_Z + PEN_DOOR_HALF,
+      maxZ: hd,
+    },
     // Front left of door
     {
       type: "box",
@@ -604,7 +627,7 @@ function BarnWindow({
 
 /**
  * Long barn wall with two rectangular openings for large windows.
- * side: -1 left (x = -W/2), +1 right (x = +W/2)
+ * Used on the left wall only (right wall has a solid face + pen doorway).
  */
 function BarnSideWallWithWindows({ side, W, D, H, wallT, red }) {
   const x = side * (W / 2);
@@ -617,26 +640,19 @@ function BarnSideWallWithWindows({ side, W, D, H, wallT, red }) {
   const zB = BARN_WIN_Z;
   const halfW = BARN_WIN_W / 2;
 
-  // Z spans for wall columns around the two openings
   const zRanges = [
-    { z0: -hd, z1: zA - halfW }, // back end
-    { z0: zA + halfW, z1: zB - halfW }, // between windows
-    { z0: zB + halfW, z1: hd }, // front end
+    { z0: -hd, z1: zA - halfW },
+    { z0: zA + halfW, z1: zB - halfW },
+    { z0: zB + halfW, z1: hd },
   ];
 
   return (
     <group>
-      {/* Full-width band below windows */}
-      <mesh
-        position={[x, winBottom / 2, 0]}
-        castShadow
-        receiveShadow
-      >
+      <mesh position={[x, winBottom / 2, 0]} castShadow receiveShadow>
         <boxGeometry args={[wallT, winBottom, D]} />
         <meshToonMaterial color={red} />
         <Outlines color={COLORS.outline} thickness={2} />
       </mesh>
-      {/* Full-width band above windows */}
       <mesh
         position={[x, (winTop + H) / 2, 0]}
         castShadow
@@ -646,15 +662,13 @@ function BarnSideWallWithWindows({ side, W, D, H, wallT, red }) {
         <meshToonMaterial color={red} />
         <Outlines color={COLORS.outline} thickness={2} />
       </mesh>
-      {/* Vertical wall strips between / beside openings */}
       {zRanges.map(({ z0, z1 }, i) => {
         const len = z1 - z0;
         if (len < 0.05) return null;
-        const zc = (z0 + z1) / 2;
         return (
           <mesh
             key={i}
-            position={[x, midY, zc]}
+            position={[x, midY, (z0 + z1) / 2]}
             castShadow
             receiveShadow
           >
@@ -664,6 +678,82 @@ function BarnSideWallWithWindows({ side, W, D, H, wallT, red }) {
           </mesh>
         );
       })}
+    </group>
+  );
+}
+
+/**
+ * Right barn wall: solid red face + always-open wide pen doorway (no windows, no door leaf).
+ */
+function BarnRightWallWithPenDoor({ W, D, H, wallT, red }) {
+  const x = W / 2;
+  const hd = D / 2;
+  const doorZ0 = PEN_DOOR_Z - PEN_DOOR_HALF;
+  const doorZ1 = PEN_DOOR_Z + PEN_DOOR_HALF;
+  const woodDark = COLORS.woodDark;
+  const segments = [
+    { z0: -hd, z1: doorZ0 },
+    { z0: doorZ1, z1: hd },
+  ];
+
+  return (
+    <group>
+      {/* Full-height wall panels on either side of the pen opening */}
+      {segments.map(({ z0, z1 }, i) => {
+        const len = z1 - z0;
+        if (len < 0.05) return null;
+        return (
+          <mesh
+            key={`rw-${i}`}
+            position={[x, H / 2, (z0 + z1) / 2]}
+            castShadow
+            receiveShadow
+          >
+            <boxGeometry args={[wallT, H, len]} />
+            <meshToonMaterial color={red} />
+            <Outlines color={COLORS.outline} thickness={2} />
+          </mesh>
+        );
+      })}
+      {/* Fill above the opening up to the eave */}
+      <mesh
+        position={[x, (PEN_DOOR_H + H) / 2, PEN_DOOR_Z]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry args={[wallT, H - PEN_DOOR_H, PEN_DOOR_W]} />
+        <meshToonMaterial color={red} />
+        <Outlines color={COLORS.outline} thickness={1.5} />
+      </mesh>
+      {/* Jambs */}
+      {[doorZ0, doorZ1].map((z, i) => (
+        <mesh
+          key={`jamb-${i}`}
+          position={[x, PEN_DOOR_H / 2, z]}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[wallT + 0.1, PEN_DOOR_H, 0.28]} />
+          <meshToonMaterial color={woodDark} />
+          <Outlines color={COLORS.outline} thickness={1.2} />
+        </mesh>
+      ))}
+      {/* Lintel */}
+      <mesh
+        position={[x, PEN_DOOR_H + 0.14, PEN_DOOR_Z]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry args={[wallT + 0.12, 0.28, PEN_DOOR_W + 0.4]} />
+        <meshToonMaterial color={woodDark} />
+        <Outlines color={COLORS.outline} thickness={1.2} />
+      </mesh>
+      {/* Threshold */}
+      <mesh position={[x, 0.08, PEN_DOOR_Z]} castShadow receiveShadow>
+        <boxGeometry args={[wallT + 0.4, 0.12, PEN_DOOR_W + 0.2]} />
+        <meshToonMaterial color={COLORS.wood} />
+        <Outlines color={COLORS.outline} thickness={0.8} />
+      </mesh>
     </group>
   );
 }
@@ -696,9 +786,6 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
 
       {/* 3 open horse stalls — left wall, no doors */}
       <HorseStalls />
-
-      {/* Pet food + water bowls (Callie / cat meal trips) */}
-      <PetBowls />
 
       {/* Back wall — split for sliding door opening */}
       <mesh
@@ -736,7 +823,7 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
       </mesh>
       <BarnBackSlideDoor doorState={doorState} />
 
-      {/* Left / right walls — openings for 4 large transparent windows */}
+      {/* Left wall — two large windows */}
       <BarnSideWallWithWindows
         side={-1}
         W={W}
@@ -745,8 +832,8 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
         wallT={wallT}
         red={red}
       />
-      <BarnSideWallWithWindows
-        side={1}
+      {/* Right wall — solid + wide open pen doorway (no windows, no door leaf) */}
+      <BarnRightWallWithPenDoor
         W={W}
         D={D}
         H={H}
@@ -886,7 +973,7 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
         <meshToonMaterial color={white} />
       </mesh>
 
-      {/* 4 large white transparent windows (2 per long wall) */}
+      {/* 2 large white transparent windows on the left wall only */}
       <BarnWindow
         position={[-W / 2 - 0.02, BARN_WIN_Y, -BARN_WIN_Z]}
         rotation={[0, Math.PI / 2, 0]}
@@ -895,21 +982,27 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
         position={[-W / 2 - 0.02, BARN_WIN_Y, BARN_WIN_Z]}
         rotation={[0, Math.PI / 2, 0]}
       />
-      <BarnWindow
-        position={[W / 2 + 0.02, BARN_WIN_Y, -BARN_WIN_Z]}
-        rotation={[0, -Math.PI / 2, 0]}
-      />
-      <BarnWindow
-        position={[W / 2 + 0.02, BARN_WIN_Y, BARN_WIN_Z]}
-        rotation={[0, -Math.PI / 2, 0]}
-      />
 
-      {/* Foundation */}
-      <mesh position={[0, 0.12, 0]} receiveShadow>
-        <boxGeometry args={[W + 0.4, 0.25, D + 0.4]} />
-        <meshToonMaterial color={COLORS.stone} />
-        <Outlines color={COLORS.outline} thickness={1.5} />
-      </mesh>
+      {/* Foundation skirt under walls (not a solid slab — interior floor stays visible) */}
+      {[
+        // Front
+        [0, 0.1, frontZ + 0.15, W + 0.5, 0.2, 0.35],
+        // Back
+        [0, 0.1, backZ - 0.15, W + 0.5, 0.2, 0.35],
+        // Left
+        [-W / 2 - 0.15, 0.1, 0, 0.35, 0.2, D + 0.2],
+        // Right
+        [W / 2 + 0.15, 0.1, 0, 0.35, 0.2, D + 0.2],
+      ].map(([x, y, z, w, h, d], i) => (
+        <mesh key={`found-${i}`} position={[x, y, z]} receiveShadow castShadow>
+          <boxGeometry args={[w, h, d]} />
+          <meshToonMaterial color={COLORS.stone} />
+          <Outlines color={COLORS.outline} thickness={1} />
+        </mesh>
+      ))}
+
+      {/* Pet bowls last so they draw cleanly above the floor */}
+      <PetBowls />
     </group>
   );
 }
@@ -962,16 +1055,31 @@ export const CABIN_DOOR_OPEN_ANGLE = 1.85; // ~106° open inward
 export const CABIN_GATE_OPEN_ANGLE = 1.35;
 export const CABIN_GATE_AUTO_RANGE = 3.2;
 
+function makeSwingGateState() {
+  return {
+    open: false,
+    /**
+     * Swing sign for leaf rotation.y (or left leaf for double gates).
+     * Front: +1 into yard (−Z), −1 outward (+Z)
+     * Back:  +1 outward (−Z), −1 into yard (+Z)  — set by push helpers
+     */
+    openDir: 1,
+    angle: 0,
+    pushCooldown: 0,
+  };
+}
+
 export function createCabinState() {
   return {
     /** Front door: interact to toggle */
     doorOpen: false,
     doorAngle: 0, // 0 closed → CABIN_DOOR_OPEN_ANGLE
-    /** Picket gate: auto-opens when player walks through */
-    gateOpen: false,
-    gateAngle: 0, // 0 closed → CABIN_GATE_OPEN_ANGLE
-    /** Keep gate open briefly after leaving trigger */
-    gateHold: 0,
+    /** Main picket gate (path) — double leaf, push-to-open with direction */
+    mainGate: makeSwingGateState(),
+    /** Garden front — single swing, push-to-open */
+    gardenFront: makeSwingGateState(),
+    /** Garden back — single swing, push-to-open */
+    gardenBack: makeSwingGateState(),
   };
 }
 
@@ -1001,6 +1109,29 @@ export function getCabinGateWorld() {
 
 export function distToCabinGate(x, z) {
   const g = getCabinGateWorld();
+  return Math.hypot(x - g.x, z - g.z);
+}
+
+/** Local X of garden gates (aligned with garden plot center) */
+export function getGardenGateLocalX() {
+  return GARDEN_LOCAL.x;
+}
+
+export function getGardenFrontGateWorld() {
+  return cabinLocalToWorld(getGardenGateLocalX(), CABIN_YARD.front);
+}
+
+export function getGardenBackGateWorld() {
+  return cabinLocalToWorld(getGardenGateLocalX(), -CABIN_YARD.back);
+}
+
+export function distToGardenFrontGate(x, z) {
+  const g = getGardenFrontGateWorld();
+  return Math.hypot(x - g.x, z - g.z);
+}
+
+export function distToGardenBackGate(x, z) {
+  const g = getGardenBackGateWorld();
   return Math.hypot(x - g.x, z - g.z);
 }
 
@@ -1104,40 +1235,42 @@ export function getCabinColliders(cabinState) {
   return boxes;
 }
 
+function swingGateClosed(g) {
+  return !g?.open && Math.abs(g?.angle ?? 0) < 0.2;
+}
+
 /**
  * Thin picket-fence colliders around the cabin yard.
- * Gate gap opens when auto-gate is swung open.
+ * Main path gate + garden front/back gates open when swung open.
  */
 export function getCabinYardColliders(cabinState) {
   const y = CABIN_YARD;
   const leftW = y.leftW ?? y.halfW;
+  const gh = y.gateHalf;
+  const gx = getGardenGateLocalX();
   const boxes = [];
-  // Front fence left / right of gate (local +Z)
-  boxes.push(
-    cabinWallBox(-leftW, -y.gateHalf, y.front - 0.08, y.front + 0.08, 0.08)
-  );
-  boxes.push(
-    cabinWallBox(y.gateHalf, y.halfW, y.front - 0.08, y.front + 0.08, 0.08)
-  );
-  // Closed gate blocks the opening
-  const gateClosed =
-    !cabinState?.gateOpen && (cabinState?.gateAngle ?? 0) < 0.2;
-  if (gateClosed) {
-    boxes.push(
-      cabinWallBox(
-        -y.gateHalf,
-        y.gateHalf,
-        y.front - 0.08,
-        y.front + 0.08,
-        0.08
-      )
-    );
+
+  const frontZ0 = y.front - 0.08;
+  const frontZ1 = y.front + 0.08;
+  boxes.push(cabinWallBox(-leftW, gx - gh, frontZ0, frontZ1, 0.08));
+  boxes.push(cabinWallBox(gx + gh, -gh, frontZ0, frontZ1, 0.08));
+  boxes.push(cabinWallBox(gh, y.halfW, frontZ0, frontZ1, 0.08));
+
+  if (swingGateClosed(cabinState?.mainGate)) {
+    boxes.push(cabinWallBox(-gh, gh, frontZ0, frontZ1, 0.08));
   }
-  // Back
-  boxes.push(
-    cabinWallBox(-leftW, y.halfW, -y.back - 0.08, -y.back + 0.08, 0.08)
-  );
-  // Sides
+  if (swingGateClosed(cabinState?.gardenFront)) {
+    boxes.push(cabinWallBox(gx - gh, gx + gh, frontZ0, frontZ1, 0.08));
+  }
+
+  const backZ0 = -y.back - 0.08;
+  const backZ1 = -y.back + 0.08;
+  boxes.push(cabinWallBox(-leftW, gx - gh, backZ0, backZ1, 0.08));
+  boxes.push(cabinWallBox(gx + gh, y.halfW, backZ0, backZ1, 0.08));
+  if (swingGateClosed(cabinState?.gardenBack)) {
+    boxes.push(cabinWallBox(gx - gh, gx + gh, backZ0, backZ1, 0.08));
+  }
+
   boxes.push(
     cabinWallBox(-leftW - 0.08, -leftW + 0.08, -y.back, y.front, 0.08)
   );
@@ -1145,6 +1278,176 @@ export function getCabinYardColliders(cabinState) {
     cabinWallBox(y.halfW - 0.08, y.halfW + 0.08, -y.back, y.front, 0.08)
   );
   return boxes;
+}
+
+/**
+ * Push-open a fence-line gate along local X (front or back of yard).
+ * face: "front" | "back"
+ * Returns true if open / direction changed (for SFX).
+ */
+export function tryPushCabinSwingGate(
+  localX,
+  localZ,
+  velX,
+  velZ,
+  isMoving,
+  gate,
+  {
+    gateX,
+    gateZ,
+    halfW,
+    face, // "front" | "back"
+  }
+) {
+  if (!gate || !isMoving) return false;
+
+  const inOpening =
+    localX >= gateX - halfW * 1.15 &&
+    localX <= gateX + halfW * 1.15 &&
+    localZ >= gateZ - 1.55 &&
+    localZ <= gateZ + 1.55;
+
+  // openDir: sign of leaf rotation.y (single leaf / left leaf)
+  // Front: +rot → into yard (−Z); −rot → out (+Z)
+  // Back:  +rot → out (−Z); −rot → into yard (+Z)
+  let pushDir;
+  if (Math.abs(velZ) > 0.001 && Math.abs(velZ) >= Math.abs(velX) * 0.25) {
+    if (face === "front") {
+      pushDir = velZ < 0 ? 1 : -1; // into yard / out
+    } else {
+      pushDir = velZ > 0 ? -1 : 1; // into yard / out
+    }
+  } else {
+    // Side of fence fallback
+    if (face === "front") {
+      pushDir = localZ > gateZ ? 1 : -1; // outside → push in
+    } else {
+      pushDir = localZ < gateZ ? -1 : 1; // outside (more −Z) → push in
+    }
+  }
+
+  const openDir = gate.openDir >= 0 ? 1 : -1;
+  const ang = gate.angle ?? 0;
+  const fullySwung = Math.abs(ang) > 0.45;
+
+  // Leaf hangs from left hinge (gateX - halfW); open free end near hinge + openDir
+  const hingeX = gateX - halfW;
+  const nearOpenLeaf =
+    fullySwung &&
+    Math.abs(localX - hingeX) < 1.5 &&
+    (openDir > 0
+      ? localZ <= gateZ + 0.45 && localZ >= gateZ - halfW * 2.1
+      : localZ >= gateZ - 0.45 && localZ <= gateZ + halfW * 2.1);
+
+  if (!gate.open && inOpening) {
+    gate.open = true;
+    gate.openDir = pushDir;
+    gate.pushCooldown = 0.55;
+    return true;
+  }
+  if (!gate.open) return false;
+  if ((gate.pushCooldown ?? 0) > 0) return false;
+
+  if (inOpening && pushDir !== openDir) {
+    const reversing =
+      Math.abs(velZ) > 0.001 ||
+      (face === "front"
+        ? openDir > 0
+          ? localZ > gateZ + 0.12
+          : localZ < gateZ - 0.12
+        : openDir < 0
+          ? localZ < gateZ - 0.12
+          : localZ > gateZ + 0.12);
+    if (reversing) {
+      gate.openDir = pushDir;
+      gate.open = true;
+      gate.pushCooldown = 0.35;
+      return true;
+    }
+  }
+
+  if (nearOpenLeaf) {
+    const throughGap =
+      localX >= gateX - halfW * 0.85 &&
+      localX <= gateX + halfW * 0.85 &&
+      Math.abs(localZ - gateZ) < 1.0;
+    const closingPush =
+      openDir > 0
+        ? velZ > 0.0005 || (Math.abs(velZ) <= 0.0005 && localZ < gateZ - 0.3)
+        : velZ < -0.0005 ||
+          (Math.abs(velZ) <= 0.0005 && localZ > gateZ + 0.3);
+    if (closingPush && !throughGap) {
+      gate.open = false;
+      gate.pushCooldown = 0.45;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Push all cabin yard gates (main double + garden singles). */
+export function tryPushCabinYardGates(
+  worldX,
+  worldZ,
+  velX,
+  velZ,
+  isMoving,
+  cabinState
+) {
+  if (!cabinState || !isMoving) return false;
+  const loc = worldToCabinLocal(worldX, worldZ);
+  // Approximate cabin-local velocity (yaw 0 → same axes)
+  const lvX = velX;
+  const lvZ = velZ;
+  const y = CABIN_YARD;
+  const gh = y.gateHalf;
+  const gx = getGardenGateLocalX();
+  let changed = false;
+  if (
+    tryPushCabinSwingGate(loc.x, loc.z, lvX, lvZ, isMoving, cabinState.mainGate, {
+      gateX: 0,
+      gateZ: y.front,
+      halfW: gh,
+      face: "front",
+    })
+  )
+    changed = true;
+  if (
+    tryPushCabinSwingGate(
+      loc.x,
+      loc.z,
+      lvX,
+      lvZ,
+      isMoving,
+      cabinState.gardenFront,
+      {
+        gateX: gx,
+        gateZ: y.front,
+        halfW: gh,
+        face: "front",
+      }
+    )
+  )
+    changed = true;
+  if (
+    tryPushCabinSwingGate(
+      loc.x,
+      loc.z,
+      lvX,
+      lvZ,
+      isMoving,
+      cabinState.gardenBack,
+      {
+        gateX: gx,
+        gateZ: -y.back,
+        halfW: gh,
+        face: "back",
+      }
+    )
+  )
+    changed = true;
+  return changed;
 }
 
 /** White transparent cabin window (local +Z faces outward) */
@@ -1804,35 +2107,50 @@ function HouseGarden() {
   );
 }
 
+/** Smooth swing-gate angle toward openDir * CABIN_GATE_OPEN_ANGLE or 0 */
+function stepSwingGateVisual(gate, delta) {
+  if (!gate) return 0;
+  if (gate.pushCooldown > 0) {
+    gate.pushCooldown = Math.max(0, gate.pushCooldown - delta);
+  }
+  const dir = gate.openDir >= 0 ? 1 : -1;
+  const target = gate.open ? dir * CABIN_GATE_OPEN_ANGLE : 0;
+  const cur = gate.angle ?? 0;
+  const next = cur + (target - cur) * Math.min(1, delta * 7);
+  gate.angle = Math.abs(next - target) < 0.01 ? target : next;
+  return gate.angle;
+}
+
 /**
- * White waist-high picket fence, stone path to door, flower beds,
- * and house-sized dirt garden left of the cabin.
- * Gate auto-opens when the player walks through (cabinState).
+ * White waist-high picket fence, stone path, garden, and push-open gates.
+ * Main path = double leaf; garden front/back = single swing leaf.
+ * Open direction follows player push (same idea as barn pen gate).
  */
 function CabinYard({ cabinState }) {
   const y = CABIN_YARD;
   const leftW = y.leftW ?? y.halfW;
   const frontZ = CABIN_D / 2;
   const white = COLORS.white;
+  const gh = y.gateHalf;
+  const gx = getGardenGateLocalX();
   const leftGateRef = useRef();
   const rightGateRef = useRef();
+  const gFrontRef = useRef();
+  const gBackRef = useRef();
 
   useFrame((_, delta) => {
     if (!cabinState) return;
-    // Auto open near player (Player sets gateOpen); hold then close
-    if (cabinState.gateOpen) {
-      cabinState.gateHold = 0.85;
-    } else if (cabinState.gateHold > 0) {
-      cabinState.gateHold = Math.max(0, cabinState.gateHold - delta);
-    }
-    const wantOpen = cabinState.gateOpen || cabinState.gateHold > 0;
-    const target = wantOpen ? CABIN_GATE_OPEN_ANGLE : 0;
-    const cur = cabinState.gateAngle ?? 0;
-    const next = cur + (target - cur) * Math.min(1, delta * 7);
-    cabinState.gateAngle = Math.abs(next - target) < 0.01 ? target : next;
-    if (leftGateRef.current) leftGateRef.current.rotation.y = cabinState.gateAngle;
-    if (rightGateRef.current)
-      rightGateRef.current.rotation.y = -cabinState.gateAngle;
+    // Main double gate: leaves mirror with ±angle
+    const mainA = stepSwingGateVisual(cabinState.mainGate, delta);
+    if (leftGateRef.current) leftGateRef.current.rotation.y = mainA;
+    if (rightGateRef.current) rightGateRef.current.rotation.y = -mainA;
+
+    // Garden singles: full-width leaf, hinge on left post
+    const gfA = stepSwingGateVisual(cabinState.gardenFront, delta);
+    if (gFrontRef.current) gFrontRef.current.rotation.y = gfA;
+
+    const gbA = stepSwingGateVisual(cabinState.gardenBack, delta);
+    if (gBackRef.current) gBackRef.current.rotation.y = gbA;
   });
 
   // Stone path from gate (front fence) to porch
@@ -1879,28 +2197,43 @@ function CabinYard({ cabinState }) {
   }
 
   const sideZ = (-y.back + y.front) / 2;
-  // Fence runs: front L/R, back, left, right (asymmetric left for garden)
+  // Fence runs — front: left of garden gate | between garden & main | right of main
+  // back: left of garden gate | right of garden gate
   const segs = [
     {
-      key: "fl",
-      x: (-leftW - y.gateHalf) / 2,
+      key: "f-left",
+      x: (-leftW + (gx - gh)) / 2,
       z: y.front,
       rot: 0,
-      len: leftW - y.gateHalf,
+      len: gx - gh - (-leftW),
     },
     {
-      key: "fr",
-      x: (y.halfW + y.gateHalf) / 2,
+      key: "f-mid",
+      x: (gx + gh + -gh) / 2,
       z: y.front,
       rot: 0,
-      len: y.halfW - y.gateHalf,
+      len: -gh - (gx + gh),
     },
     {
-      key: "bk",
-      x: (y.halfW - leftW) / 2,
+      key: "f-right",
+      x: (gh + y.halfW) / 2,
+      z: y.front,
+      rot: 0,
+      len: y.halfW - gh,
+    },
+    {
+      key: "b-left",
+      x: (-leftW + (gx - gh)) / 2,
       z: -y.back,
       rot: 0,
-      len: leftW + y.halfW,
+      len: gx - gh - (-leftW),
+    },
+    {
+      key: "b-right",
+      x: (gx + gh + y.halfW) / 2,
+      z: -y.back,
+      rot: 0,
+      len: y.halfW - (gx + gh),
     },
     {
       key: "lf",
@@ -1916,7 +2249,7 @@ function CabinYard({ cabinState }) {
       rot: Math.PI / 2,
       len: y.front + y.back,
     },
-  ];
+  ].filter((s) => s.len > 0.05);
 
   const lawnW = leftW + y.halfW - 0.4;
   const lawnX = (y.halfW - leftW) / 2;
@@ -2002,9 +2335,17 @@ function CabinYard({ cabinState }) {
           <PicketPanel length={s.len} />
         </group>
       ))}
-      {/* Gate posts */}
-      {[-y.gateHalf, y.gateHalf].map((x, i) => (
-        <group key={`gp-${i}`} position={[x, 0, y.front]}>
+
+      {/* Gate posts: main double + garden single (hinge + latch) */}
+      {[
+        [-gh, y.front],
+        [gh, y.front],
+        [gx - gh, y.front],
+        [gx + gh, y.front],
+        [gx - gh, -y.back],
+        [gx + gh, -y.back],
+      ].map(([px, pz], i) => (
+        <group key={`gp-${i}`} position={[px, 0, pz]}>
           <mesh position={[0, 0.6, 0]} castShadow>
             <boxGeometry args={[0.12, 1.2, 0.12]} />
             <meshToonMaterial color={white} />
@@ -2015,15 +2356,30 @@ function CabinYard({ cabinState }) {
           </mesh>
         </group>
       ))}
-      {/* Gate leaves — animate open when player walks through */}
-      <group ref={leftGateRef} position={[-y.gateHalf, 0, y.front]}>
-        <group position={[y.gateHalf * 0.85, 0, 0]}>
-          <PicketPanel length={y.gateHalf * 1.7} />
+
+      {/* Main path gate — double leaves, swing with push direction */}
+      <group ref={leftGateRef} position={[-gh, 0, y.front]}>
+        <group position={[gh * 0.85, 0, 0]}>
+          <PicketPanel length={gh * 1.7} />
         </group>
       </group>
-      <group ref={rightGateRef} position={[y.gateHalf, 0, y.front]}>
-        <group position={[-y.gateHalf * 0.85, 0, 0]}>
-          <PicketPanel length={y.gateHalf * 1.7} />
+      <group ref={rightGateRef} position={[gh, 0, y.front]}>
+        <group position={[-gh * 0.85, 0, 0]}>
+          <PicketPanel length={gh * 1.7} />
+        </group>
+      </group>
+
+      {/* Garden front — single swing leaf (hinge left post) */}
+      <group ref={gFrontRef} position={[gx - gh, 0, y.front]}>
+        <group position={[gh * 0.95, 0, 0]}>
+          <PicketPanel length={gh * 1.9} />
+        </group>
+      </group>
+
+      {/* Garden back — single swing leaf (hinge left post) */}
+      <group ref={gBackRef} position={[gx - gh, 0, -y.back]}>
+        <group position={[gh * 0.95, 0, 0]}>
+          <PicketPanel length={gh * 1.9} />
         </group>
       </group>
     </group>

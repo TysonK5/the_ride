@@ -3,6 +3,11 @@ import { useFrame } from "@react-three/fiber";
 import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
+import { resolveAnimalCollisions } from "../../systems/colliders";
+import {
+  setAnimalBody,
+  resolveAnimalOverlaps,
+} from "../../systems/animalCollision";
 
 const SADDLE = "#6b4423";
 const SADDLE_DARK = "#4a2e16";
@@ -122,11 +127,48 @@ export function callNearestHorse(mounts, px, pz) {
   return best;
 }
 
+const _horseCol = new THREE.Vector3();
+/** Collision radius while free-roaming / answering a call */
+export const IDLE_HORSE_RADIUS = 0.85;
+
+/**
+ * Keep free-roaming mounts out of barn walls, cabin, and pen fence.
+ */
+function applyHorseWorldCollision(
+  rideState,
+  cabinState,
+  barnDoorState,
+  gateState
+) {
+  if (!rideState?.position) return;
+  const id = rideState.name || "horse";
+  _horseCol.copy(rideState.position);
+  resolveAnimalCollisions(
+    _horseCol,
+    IDLE_HORSE_RADIUS,
+    cabinState,
+    barnDoorState,
+    gateState
+  );
+  resolveAnimalOverlaps(_horseCol, IDLE_HORSE_RADIUS, id);
+  rideState.position.x = _horseCol.x;
+  rideState.position.z = _horseCol.z;
+  rideState.position.y = 0;
+  setAnimalBody(id, rideState.position.x, rideState.position.z, IDLE_HORSE_RADIUS);
+}
+
 /**
  * Unmounted idle brain: stand / wander inside barn+pen, or come when called.
  * Player owns position while mounted.
+ * Structure colliders keep horses from clipping barn / cabin / fence.
  */
-export function updateHorseIdleAI(rideState, delta) {
+export function updateHorseIdleAI(
+  rideState,
+  delta,
+  cabinState = null,
+  barnDoorState = null,
+  gateState = null
+) {
   if (!rideState) return;
   if (rideState.mounted || rideState.busy || rideState.drinking) {
     if (rideState.mounted && rideState.aiMode === "come") {
@@ -135,7 +177,7 @@ export function updateHorseIdleAI(rideState, delta) {
     return;
   }
 
-  // --- Called: trot to player (can leave the pen) ---
+  // --- Called: trot to player (can leave the pen via open gate) ---
   if (rideState.aiMode === "come") {
     rideState.aiTimer -= delta;
     const dx = rideState.callTargetX - rideState.position.x;
@@ -146,6 +188,12 @@ export function updateHorseIdleAI(rideState, delta) {
       rideState.moving = false;
       rideState.sprinting = false;
       rideState.aiTimer = 2 + Math.random() * 4;
+      applyHorseWorldCollision(
+        rideState,
+        cabinState,
+        barnDoorState,
+        gateState
+      );
       return;
     }
     const step = Math.min(dist, COME_SPEED * delta);
@@ -156,6 +204,12 @@ export function updateHorseIdleAI(rideState, delta) {
     rideState.moving = true;
     rideState.sprinting = dist > 14;
     rideState.airborne = false;
+    applyHorseWorldCollision(
+      rideState,
+      cabinState,
+      barnDoorState,
+      gateState
+    );
     return;
   }
 
@@ -164,6 +218,12 @@ export function updateHorseIdleAI(rideState, delta) {
     rideState.moving = false;
     rideState.sprinting = false;
     rideState.aiMode = "stand";
+    applyHorseWorldCollision(
+      rideState,
+      cabinState,
+      barnDoorState,
+      gateState
+    );
     return;
   }
 
@@ -178,6 +238,12 @@ export function updateHorseIdleAI(rideState, delta) {
       rideState.moving = false;
       rideState.sprinting = false;
       rideState.aiTimer = 1.8 + Math.random() * 5.5;
+      applyHorseWorldCollision(
+        rideState,
+        cabinState,
+        barnDoorState,
+        gateState
+      );
       return;
     }
     const step = Math.min(dist, IDLE_WALK_SPEED * delta);
@@ -197,6 +263,12 @@ export function updateHorseIdleAI(rideState, delta) {
     rideState.yaw = Math.atan2(dx, dz);
     rideState.moving = true;
     rideState.sprinting = false;
+    applyHorseWorldCollision(
+      rideState,
+      cabinState,
+      barnDoorState,
+      gateState
+    );
     return;
   }
 
@@ -214,6 +286,12 @@ export function updateHorseIdleAI(rideState, delta) {
       rideState.yaw += (Math.random() - 0.5) * 1.1;
     }
   }
+  applyHorseWorldCollision(
+    rideState,
+    cabinState,
+    barnDoorState,
+    gateState
+  );
 }
 
 /** Shared mutable ride state (Player writes, Horse/Unicorn reads). */
@@ -1049,7 +1127,14 @@ function placeReinSegment(mesh, from, to) {
 }
 
 export const Horse = forwardRef(function Horse(
-  { rideState, colors = HORSE_PALETTE, unicorn = false },
+  {
+    rideState,
+    colors = HORSE_PALETTE,
+    unicorn = false,
+    cabinState = null,
+    barnDoorState = null,
+    gateState = null,
+  },
   ref
 ) {
   const groupRef = useRef();
@@ -1063,7 +1148,23 @@ export const Horse = forwardRef(function Horse(
     if (!groupRef.current || !rideState) return;
 
     // Free-roam / answer whistle when not under player control
-    updateHorseIdleAI(rideState, delta);
+    updateHorseIdleAI(
+      rideState,
+      delta,
+      cabinState,
+      barnDoorState,
+      gateState
+    );
+
+    // Mounted horses still register a body so pets don't walk through them
+    if (rideState.mounted || rideState.busy) {
+      setAnimalBody(
+        rideState.name || "horse",
+        rideState.position.x,
+        rideState.position.z,
+        IDLE_HORSE_RADIUS
+      );
+    }
 
     groupRef.current.position.copy(rideState.position);
     groupRef.current.rotation.y = rideState.yaw;
@@ -1093,13 +1194,19 @@ export const Horse = forwardRef(function Horse(
 });
 
 /** Light purple unicorn — same ride logic, rainbow horn */
-export const Unicorn = forwardRef(function Unicorn({ rideState }, ref) {
+export const Unicorn = forwardRef(function Unicorn(
+  { rideState, cabinState, barnDoorState, gateState },
+  ref
+) {
   return (
     <Horse
       ref={ref}
       rideState={rideState}
       colors={UNICORN_PALETTE}
       unicorn
+      cabinState={cabinState}
+      barnDoorState={barnDoorState}
+      gateState={gateState}
     />
   );
 });

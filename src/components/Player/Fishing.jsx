@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
@@ -19,6 +19,8 @@ export const FISH_TYPES = [
   { name: "Perch", color: "#d4a020", size: 0.7 },
   { name: "Sunfish", color: "#e8a030", size: 0.65 },
 ];
+
+const LINE_SEGMENTS = 28;
 
 export function createFishingState() {
   return {
@@ -73,64 +75,92 @@ export function pickRandomFish() {
 }
 
 /**
- * Fishing rod held in the right hand (parent under rightArmRef hand).
- * Tip points outward for the cast line.
+ * Fishing rod in the right hand — vertical shaft (tip up) when the arm is raised.
+ * Hand sits under the arm; arm local −Y points up when raised, so we flip the
+ * pole so its +Y (shaft) runs the same way (world vertical).
+ * tipRef marks the line attachment at the tip.
  */
-export function FishingPole() {
+export function FishingPole({ tipRef }) {
+  // π on X: pole +Y aligns with hand −Y → tip above head when arm is up
+  // small extra tilt keeps tip slightly forward over the water
   return (
-    <group
-      position={[0.02, -0.02, 0.04]}
-      rotation={[-0.35, 0.15, -0.55]}
-    >
-      {/* Grip */}
+    <group position={[0.0, 0.0, 0.02]} rotation={[Math.PI - 0.12, 0.08, 0.05]}>
+      {/* Grip / butt in palm */}
       <mesh position={[0, 0.05, 0]} castShadow>
-        <cylinderGeometry args={[0.018, 0.022, 0.14, 6]} />
+        <cylinderGeometry args={[0.02, 0.026, 0.16, 6]} />
         <meshToonMaterial color="#3a2818" />
       </mesh>
-      {/* Shaft */}
-      <mesh position={[0, 0.55, 0]} castShadow>
-        <cylinderGeometry args={[0.012, 0.018, 0.95, 6]} />
+      {/* Lower cork section */}
+      <mesh position={[0, 0.22, 0]} castShadow>
+        <cylinderGeometry args={[0.016, 0.02, 0.22, 6]} />
+        <meshToonMaterial color="#8a6040" />
+      </mesh>
+      {/* Long vertical shaft */}
+      <mesh position={[0, 0.95, 0]} castShadow>
+        <cylinderGeometry args={[0.008, 0.016, 1.35, 6]} />
         <meshToonMaterial color={COLORS.wood} />
-        <Outlines color={COLORS.outline} thickness={0.6} />
+        <Outlines color={COLORS.outline} thickness={0.55} />
       </mesh>
-      {/* Tip */}
-      <mesh position={[0, 1.05, 0]} castShadow>
-        <cylinderGeometry args={[0.006, 0.012, 0.18, 5]} />
-        <meshToonMaterial color="#c8b090" />
+      {/* Upper tip section */}
+      <mesh position={[0, 1.72, 0]} castShadow>
+        <cylinderGeometry args={[0.004, 0.008, 0.28, 5]} />
+        <meshToonMaterial color="#d4c4a0" />
       </mesh>
-      {/* Eyelet */}
-      <mesh position={[0, 1.12, 0.02]}>
-        <torusGeometry args={[0.02, 0.005, 4, 8]} />
+      {/* Tip eyelet — line attaches here */}
+      <mesh position={[0, 1.88, 0.015]}>
+        <torusGeometry args={[0.018, 0.004, 4, 8]} />
         <meshToonMaterial color={COLORS.gold} />
       </mesh>
+      {/* Invisible tip anchor for the fishing line */}
+      <group ref={tipRef} position={[0, 1.9, 0]} />
     </group>
   );
 }
 
 /**
- * World-space aim ring, bobber, and fishing line.
- * Reads mutable fishing state each frame.
+ * World-space aim ring, bobber, and curved fishing line tip → bobber.
  */
-export function FishingWorldFX({ fishingRef, playerGroupRef }) {
+export function FishingWorldFX({ fishingRef, playerGroupRef, poleTipRef }) {
   const targetRef = useRef();
   const bobberRef = useRef();
-  const lineRef = useRef();
   const fishRef = useRef();
-  const _a = useRef(new THREE.Vector3()).current;
-  const _b = useRef(new THREE.Vector3()).current;
+  const lineObjRef = useRef();
+  const _tip = useRef(new THREE.Vector3()).current;
+  const _bob = useRef(new THREE.Vector3()).current;
   const _mid = useRef(new THREE.Vector3()).current;
+  const _ctrl = useRef(new THREE.Vector3()).current;
+  const _tmp = useRef(new THREE.Vector3()).current;
+
+  const { line, positions } = useMemo(() => {
+    const positions = new Float32Array((LINE_SEGMENTS + 1) * 3);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute(
+      "position",
+      new THREE.BufferAttribute(positions, 3)
+    );
+    const mat = new THREE.LineBasicMaterial({
+      color: 0xf2ebe0,
+      transparent: true,
+      opacity: 0.92,
+      depthTest: true,
+    });
+    const line = new THREE.Line(geo, mat);
+    line.frustumCulled = false;
+    line.visible = false;
+    return { line, positions };
+  }, []);
 
   useFrame(() => {
     const f = fishingRef?.current;
     if (!f?.active) {
       if (targetRef.current) targetRef.current.visible = false;
       if (bobberRef.current) bobberRef.current.visible = false;
-      if (lineRef.current) lineRef.current.visible = false;
+      if (line) line.visible = false;
       if (fishRef.current) fishRef.current.visible = false;
       return;
     }
 
-    // Aim target (only while aiming / waiting / bite — shows cast spot)
+    // Aim target
     if (targetRef.current) {
       const showTarget = f.phase === "aim";
       targetRef.current.visible = showTarget;
@@ -150,38 +180,94 @@ export function FishingWorldFX({ fishingRef, playerGroupRef }) {
         f.phase === "reel";
       bobberRef.current.visible = showBob;
       if (showBob) {
-        bobberRef.current.position.set(f.bobberX, f.bobberY, f.bobberZ);
-        if (f.phase === "bite") {
-          bobberRef.current.position.y =
+        let by = f.bobberY;
+        if (f.phase === "wait") {
+          // Gentle float on water
+          by = f.bobberY + Math.sin(performance.now() * 0.004) * 0.03;
+        } else if (f.phase === "bite") {
+          by =
             f.bobberY - 0.08 + Math.sin(performance.now() * 0.02) * 0.12;
         }
+        bobberRef.current.position.set(f.bobberX, by, f.bobberZ);
+        _bob.set(f.bobberX, by, f.bobberZ);
       }
     }
 
-    // Line from pole tip (approx right hand world) to bobber
-    if (lineRef.current && playerGroupRef?.current) {
-      const showLine =
-        f.phase === "cast" ||
-        f.phase === "wait" ||
-        f.phase === "bite" ||
-        f.phase === "reel";
-      lineRef.current.visible = showLine;
+    // Line from real pole tip → bobber (curved)
+    const showLine =
+      f.phase === "cast" ||
+      f.phase === "wait" ||
+      f.phase === "bite" ||
+      f.phase === "reel";
+
+    if (line) {
+      line.visible = showLine;
       if (showLine) {
-        // Approximate pole tip in front of player
-        const g = playerGroupRef.current;
-        const yaw = g.rotation.y;
-        const tipX = g.position.x + Math.sin(yaw) * 0.35 + Math.cos(yaw) * 0.55;
-        const tipY = g.position.y + 1.85;
-        const tipZ = g.position.z + Math.cos(yaw) * 0.35 - Math.sin(yaw) * 0.55;
-        _a.set(tipX, tipY, tipZ);
-        _b.set(f.bobberX, f.bobberY, f.bobberZ);
-        _mid.addVectors(_a, _b).multiplyScalar(0.5);
-        // Sag the line slightly
-        _mid.y -= Math.min(1.2, _a.distanceTo(_b) * 0.12);
-        const dist = _a.distanceTo(_b);
-        lineRef.current.position.copy(_mid);
-        lineRef.current.scale.set(1, 1, dist);
-        lineRef.current.lookAt(_b);
+        // Prefer live tip transform; fall back to overhead estimate
+        if (poleTipRef?.current) {
+          poleTipRef.current.getWorldPosition(_tip);
+        } else if (playerGroupRef?.current) {
+          const g = playerGroupRef.current;
+          const yaw = g.rotation.y;
+          _tip.set(
+            g.position.x + Math.sin(yaw) * 0.15 + Math.cos(yaw) * 0.25,
+            g.position.y + 2.55,
+            g.position.z + Math.cos(yaw) * 0.15 - Math.sin(yaw) * 0.25
+          );
+        } else {
+          _tip.set(f.castFromX, f.castFromY + 1.2, f.castFromZ);
+        }
+
+        if (
+          f.phase !== "wait" &&
+          f.phase !== "bite" &&
+          f.phase !== "cast" &&
+          f.phase !== "reel"
+        ) {
+          _bob.set(f.bobberX, f.bobberY, f.bobberZ);
+        } else if (f.phase === "cast" || f.phase === "reel") {
+          _bob.set(f.bobberX, f.bobberY, f.bobberZ);
+        }
+
+        const dist = _tip.distanceTo(_bob);
+        // Sag: heavier curve while bobber sits in water; lighter during cast/reel
+        let sag = 0.15;
+        if (f.phase === "wait" || f.phase === "bite") {
+          // Clear catenary-style droop under its own weight
+          sag = Math.min(2.4, 0.45 + dist * 0.16);
+          if (f.phase === "bite") sag += 0.15;
+        } else if (f.phase === "cast") {
+          // Slight arc mid-cast
+          const t = Math.min(1, f.phaseT / CAST_DURATION);
+          sag = Math.sin(t * Math.PI) * Math.min(1.1, dist * 0.1);
+        } else if (f.phase === "reel") {
+          sag = Math.min(1.0, 0.2 + dist * 0.08);
+        }
+
+        // Quadratic Bezier: tip → lowered mid → bobber
+        _mid.addVectors(_tip, _bob).multiplyScalar(0.5);
+        _mid.y -= sag;
+        // Bias control point slightly toward tip for a natural hang off the rod
+        _ctrl.copy(_mid);
+        _ctrl.lerp(_tip, 0.12);
+        _ctrl.y = _mid.y;
+
+        for (let i = 0; i <= LINE_SEGMENTS; i++) {
+          const t = i / LINE_SEGMENTS;
+          // Quadratic bezier: (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2
+          const u = 1 - t;
+          _tmp.set(0, 0, 0);
+          _tmp.addScaledVector(_tip, u * u);
+          _tmp.addScaledVector(_ctrl, 2 * u * t);
+          _tmp.addScaledVector(_bob, t * t);
+          const o = i * 3;
+          positions[o] = _tmp.x;
+          positions[o + 1] = _tmp.y;
+          positions[o + 2] = _tmp.z;
+        }
+        const attr = line.geometry.getAttribute("position");
+        attr.needsUpdate = true;
+        line.geometry.computeBoundingSphere();
       }
     }
 
@@ -243,11 +329,8 @@ export function FishingWorldFX({ fishingRef, playerGroupRef }) {
         </mesh>
       </group>
 
-      {/* Simple line (scaled stick) */}
-      <mesh ref={lineRef} visible={false}>
-        <cylinderGeometry args={[0.008, 0.008, 1, 4]} />
-        <meshBasicMaterial color="#e8e0d0" />
-      </mesh>
+      {/* Curved line tip → bobber */}
+      <primitive object={line} ref={lineObjRef} />
 
       {/* Catch display fish */}
       <group ref={fishRef} visible={false}>
@@ -280,29 +363,34 @@ function CatchFishMesh({ fishingRef }) {
   );
 }
 
-/** Apply locked fishing body pose (pole arm raised). */
+/**
+ * Fishing body pose — right arm nearly vertical so the pole stands upright
+ * (tip above the head), not laid out horizontal.
+ */
 export function applyFishingPose(bodyRef, leftArmRef, rightArmRef, phase) {
   if (bodyRef?.current) {
     bodyRef.current.position.y = 0.94;
-    bodyRef.current.rotation.x = phase === "cast" || phase === "reel" ? 0.08 : 0.04;
+    bodyRef.current.rotation.x =
+      phase === "cast" || phase === "reel" ? 0.04 : 0.01;
   }
   // Left arm brace / idle
   if (leftArmRef?.current) {
-    leftArmRef.current.rotation.set(-0.25, 0.15, 0.25);
+    leftArmRef.current.rotation.set(-0.15, 0.1, 0.2);
   }
-  // Right arm holds pole forward-up
+  // Right arm straight up (hand above shoulder) → pole shaft vertical
   if (rightArmRef?.current) {
     if (phase === "cast") {
-      rightArmRef.current.rotation.set(-1.35, -0.2, -0.35);
+      // Slight lean into the cast while staying mostly upright
+      rightArmRef.current.rotation.set(-2.55, -0.2, 0.05);
     } else if (phase === "reel") {
       rightArmRef.current.rotation.set(
-        -0.9 + Math.sin(performance.now() * 0.02) * 0.15,
-        -0.25,
-        -0.4
+        -2.45 + Math.sin(performance.now() * 0.018) * 0.08,
+        -0.18,
+        0.02
       );
     } else {
-      rightArmRef.current.rotation.set(-1.05, -0.15, -0.3);
+      // aim / wait / bite / catch — arm up, pole vertical
+      rightArmRef.current.rotation.set(-2.5, -0.15, 0.08);
     }
   }
 }
-

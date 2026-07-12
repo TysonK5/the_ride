@@ -22,6 +22,9 @@ import { Player } from "../Player/Player";
 import { Horse, Unicorn, createRideState } from "../Horse/Horse";
 import { Cat, createPlayerTrackState } from "../Animals/Cat";
 import { Callie } from "../Animals/Callie";
+import { Cow } from "../Animals/Cow";
+import { Chickens } from "../Animals/Chicken";
+import { Pigs } from "../Animals/Pig";
 import { HUD } from "../UI/HUD";
 import { OptionsMenu } from "../UI/OptionsMenu";
 import { MapEditor } from "../UI/MapEditor";
@@ -68,10 +71,45 @@ function Scene({
       <Fence gateState={gateState} />
       <Birds />
       <Flowers key={flowerVersion} flowerState={flowerState} />
-      <Horse rideState={rideState} />
-      <Unicorn rideState={unicornRideState} />
-      <Cat playerTrack={playerTrack} cabinState={cabinState} />
-      <Callie playerTrack={playerTrack} cabinState={cabinState} />
+      <Horse
+        rideState={rideState}
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
+      <Unicorn
+        rideState={unicornRideState}
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
+      <Cat
+        playerTrack={playerTrack}
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
+      <Callie
+        playerTrack={playerTrack}
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
+      <Cow
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
+      <Chickens
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
+      <Pigs
+        cabinState={cabinState}
+        barnDoorState={barnDoorState}
+        gateState={gateState}
+      />
       <Player
         enabled={enabled}
         rideState={rideState}

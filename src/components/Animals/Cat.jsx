@@ -3,12 +3,22 @@ import { useFrame } from "@react-three/fiber";
 import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
-import { resolveCollisions } from "../../systems/colliders";
+import { resolveAnimalCollisions } from "../../systems/colliders";
+import {
+  setAnimalBody,
+  resolveAnimalOverlaps,
+} from "../../systems/animalCollision";
 import { PLAY_HALF } from "../../systems/map";
 import {
   createFeedState,
   updateCompanionMeal,
 } from "./PetBowls";
+import {
+  CompanionWings,
+  WING_RETRACT_DELAY,
+  FLY_FOLLOW_SPEED,
+  FLY_CATCH_UP,
+} from "./CompanionWings";
 
 const GREY = "#9a9aa0";
 const GREY_DARK = "#6a6a72";
@@ -16,13 +26,15 @@ const WHITE = "#f5f0e8";
 const BLACK = "#1e1e22";
 const PINK = "#e8a0b0";
 
-/** Shared track of the player — Player writes, Cat reads */
+/** Shared track of the player — Player writes, Cat / Callie read */
 export function createPlayerTrackState(initial = [0, 0, 8]) {
   return {
     position: new THREE.Vector3(...initial),
     yaw: 0,
     moving: false,
     mounted: false,
+    /** True while mounted unicorn is airborne */
+    airborne: false,
   };
 }
 
@@ -43,20 +55,28 @@ const _next = new THREE.Vector3();
  * sits then lies down when the player stops nearby.
  * Every 3–5 min visits barn food/water bowls (~30s), then resumes follow.
  */
-export function Cat({ playerTrack, cabinState }) {
+export function Cat({
+  playerTrack,
+  cabinState,
+  barnDoorState,
+  gateState,
+}) {
   const groupRef = useRef();
   const bodyRef = useRef();
   const headRef = useRef();
   const tailRef = useRef();
   const legsRef = useRef([]);
   const feedRef = useRef(createFeedState(0.85));
+  const wingsActiveRef = useRef(false);
   const stateRef = useRef({
-    mode: "walk", // walk | sit | lay | eat | drink
+    mode: "walk", // walk | sit | lay | eat | drink | fly
     stopTimer: 0,
     sitTimer: 0,
     yaw: 0,
     pos: new THREE.Vector3(4, 0, 10),
     walkPhase: 0,
+    wingsOut: false,
+    wingTimer: 0,
   });
 
   useFrame((_, delta) => {
@@ -67,13 +87,69 @@ export function Cat({ playerTrack, cabinState }) {
     const st = stateRef.current;
     const feed = feedRef.current;
     const px = track.position.x;
+    const py = track.position.y ?? 0;
     const pz = track.position.z;
     const pyaw = track.yaw ?? 0;
+    const playerFlying = !!track.airborne;
 
-    // Meal trip takes priority over follow
-    const onMeal = updateCompanionMeal(st, feed, delta, 5.8);
+    // Wings: out while unicorn flies; hold 5s after landing then retract
+    if (playerFlying) {
+      st.wingsOut = true;
+      st.wingTimer = 0;
+    } else if (st.wingsOut) {
+      if (st.pos.y <= 0.08) {
+        st.wingTimer += delta;
+        if (st.wingTimer >= WING_RETRACT_DELAY) {
+          st.wingsOut = false;
+          st.wingTimer = 0;
+        }
+      }
+    }
+    wingsActiveRef.current = st.wingsOut;
 
-    if (!onMeal) {
+    // Skip meals while airborne chase
+    const onMeal =
+      !playerFlying &&
+      st.pos.y < 0.5 &&
+      updateCompanionMeal(st, feed, delta, 5.8);
+
+    if (playerFlying || st.pos.y > 0.15) {
+      // --- Air follow (unicorn flight) ---
+      st.mode = "fly";
+      st.stopTimer = 0;
+      st.sitTimer = 0;
+      if (feed.phase && feed.phase !== "idle") {
+        // Abort meal trip mid-air
+        feed.phase = "idle";
+        feed.path = null;
+        feed.hunger = Math.max(feed.hunger ?? 0, 30);
+      }
+
+      const backX = -Math.sin(pyaw);
+      const backZ = -Math.cos(pyaw);
+      const sideX = Math.cos(pyaw);
+      const sideZ = -Math.sin(pyaw);
+      const flyY = playerFlying ? Math.max(0.4, py + 0.35) : 0;
+      _target.set(
+        px + backX * FOLLOW_DIST + sideX * 0.4,
+        flyY,
+        pz + backZ * FOLLOW_DIST + sideZ * 0.4
+      );
+
+      _to.copy(_target).sub(st.pos);
+      const dist = _to.length();
+      if (dist > 0.08) {
+        const speed = dist > 10 ? FLY_CATCH_UP : FLY_FOLLOW_SPEED;
+        _to.normalize();
+        const step = Math.min(dist, speed * delta);
+        st.pos.x += _to.x * step;
+        st.pos.y += _to.y * step;
+        st.pos.z += _to.z * step;
+        st.yaw = Math.atan2(_to.x, _to.z);
+        st.walkPhase += delta * 16;
+      }
+      if (!playerFlying && st.pos.y < 0.05) st.pos.y = 0;
+    } else if (!onMeal) {
       // Desired point: a little behind the player
       const backX = -Math.sin(pyaw);
       const backZ = -Math.cos(pyaw);
@@ -111,7 +187,8 @@ export function Cat({ playerTrack, cabinState }) {
         if (
           st.mode === "walk" ||
           st.mode === "eat" ||
-          st.mode === "drink"
+          st.mode === "drink" ||
+          st.mode === "fly"
         ) {
           if (st.stopTimer >= SIT_DELAY) {
             st.mode = "sit";
@@ -139,15 +216,25 @@ export function Cat({ playerTrack, cabinState }) {
 
     st.pos.x = THREE.MathUtils.clamp(st.pos.x, -PLAY_HALF, PLAY_HALF);
     st.pos.z = THREE.MathUtils.clamp(st.pos.z, -PLAY_HALF, PLAY_HALF);
-    st.pos.y = 0;
-    // Allow pathing into barn during meal (doors may be closed)
-    if (!onMeal) {
-      _next.copy(st.pos);
-      resolveCollisions(_next, CAT_RADIUS, [], cabinState);
-      st.pos.copy(_next);
-    }
+    if (st.pos.y < 0) st.pos.y = 0;
 
-    g.position.set(st.pos.x, 0, st.pos.z);
+    // Ground colliders only when near ground (fly over barn/fence/pond)
+    if (st.pos.y < 0.25) {
+      _next.copy(st.pos);
+      resolveAnimalCollisions(
+        _next,
+        CAT_RADIUS,
+        cabinState,
+        barnDoorState,
+        gateState
+      );
+      resolveAnimalOverlaps(_next, CAT_RADIUS, "cat");
+      st.pos.x = _next.x;
+      st.pos.z = _next.z;
+    }
+    setAnimalBody("cat", st.pos.x, st.pos.z, CAT_RADIUS);
+
+    g.position.set(st.pos.x, st.pos.y, st.pos.z);
     g.rotation.y = st.yaw;
 
     // --- Pose ---
@@ -155,9 +242,14 @@ export function Cat({ playerTrack, cabinState }) {
     const swing = Math.sin(st.walkPhase);
     const t = performance.now() * 0.001;
     const feeding = mode === "eat" || mode === "drink";
+    const flying = mode === "fly";
 
     if (bodyRef.current) {
-      if (mode === "walk") {
+      if (flying) {
+        bodyRef.current.position.y = 0.22 + Math.sin(t * 14) * 0.04;
+        bodyRef.current.rotation.x = -0.15;
+        bodyRef.current.rotation.z = swing * 0.06;
+      } else if (mode === "walk") {
         bodyRef.current.position.y = 0.22 + Math.abs(swing) * 0.03;
         bodyRef.current.rotation.x = 0;
         bodyRef.current.rotation.z = swing * 0.04;
@@ -219,7 +311,11 @@ export function Cat({ playerTrack, cabinState }) {
       if (!leg) return;
       const side = i % 2 === 0 ? -1 : 1;
       const front = i < 2;
-      if (mode === "walk") {
+      if (flying) {
+        leg.rotation.x = front ? 0.5 : -0.35;
+        leg.position.y = 0.02;
+        leg.visible = true;
+      } else if (mode === "walk") {
         const phase = swing * (front ? 1 : -1) * side;
         leg.rotation.x = phase * 0.55;
         leg.position.y = 0;
@@ -249,6 +345,13 @@ export function Cat({ playerTrack, cabinState }) {
       userData={{ ignoreCameraCollision: true }}
     >
       <group ref={bodyRef} position={[0, 0.22, 0]}>
+        <CompanionWings
+          activeRef={wingsActiveRef}
+          color="#d8d0e8"
+          colorTip="#b0a0d0"
+          scale={0.95}
+          position={[0, 0.1, -0.04]}
+        />
         {/* Body — grey */}
         <mesh castShadow>
           <capsuleGeometry args={[0.14, 0.28, 4, 8]} />

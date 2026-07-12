@@ -1,8 +1,10 @@
 import { TREE_SPOTS } from "../components/Environment/Trees";
 import {
+  getBarnColliders,
   getCabinColliders,
   getCabinYardColliders,
 } from "../components/Town/Buildings";
+import { getFenceColliders } from "../components/Environment/Fence";
 
 /** Axis-aligned box on XZ plane: { type:'box', minX, maxX, minZ, maxZ } */
 /** Circle on XZ: { type:'circle', x, z, r } */
@@ -98,6 +100,37 @@ function pushOutOfEllipse(px, pz, r, e) {
     z: e.z + (nz / d) * rz,
     hit: true,
   };
+}
+
+/**
+ * Dynamic structure colliders for animals / player extras:
+ * barn walls (door gaps when open) + pen fence / gate.
+ */
+export function getStructureColliders(barnDoorState = null, gateState = null) {
+  return [
+    ...getBarnColliders(barnDoorState),
+    ...getFenceColliders(gateState),
+  ];
+}
+
+/**
+ * Resolve an animal (or player) against trees, lake, props, cabin, barn, fence.
+ * Mutates and returns the same Vector3.
+ */
+export function resolveAnimalCollisions(
+  position,
+  radius,
+  cabinState = null,
+  barnDoorState = null,
+  gateState = null,
+  extra = []
+) {
+  return resolveCollisions(
+    position,
+    radius,
+    [...getStructureColliders(barnDoorState, gateState), ...extra],
+    cabinState
+  );
 }
 
 /**
