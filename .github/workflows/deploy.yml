@@ -1,5 +1,6 @@
-# Build Vite app and deploy dist/ to GitHub Pages.
-# Repo Settings → Pages → Source: "GitHub Actions"
+# Build Vite app and push dist/ to the gh-pages branch.
+# Repo Settings → Pages → Source: "Deploy from a branch"
+#   Branch: gh-pages  /  Folder: / (root)
 name: Deploy to GitHub Pages
 
 on:
@@ -8,16 +9,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,20 +33,15 @@ jobs:
 
       - name: Build
         run: npm run build
-        # vite.config.js sets base: '/the_ride/' for project Pages URL
+        # vite.config.js sets base: '/the_ride/' for
+        # https://TysonK5.github.io/the_ride/
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Add .nojekyll
+        run: touch dist/.nojekyll
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          force_orphan: true
