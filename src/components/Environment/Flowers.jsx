@@ -1,10 +1,12 @@
-import { useMemo } from "react";
 import { Outlines } from "@react-three/drei";
 import { COLORS } from "../../materials/colors";
 import { isInLake } from "../../systems/colliders";
+import { isInCabinBuilding } from "../Town/Buildings";
 
 export const FLOWER_PICK_RANGE = 2.2;
 export const INITIAL_FLOWER_COUNT = 80;
+/** Persist pick / plant positions across reloads */
+const FLOWER_STORAGE_KEY = "the-ride-flowers-v1";
 
 /** 20 distinct flower species (color / petal style / scale) */
 export const FLOWER_TYPES = [
@@ -35,14 +37,14 @@ function rand(i, salt = 0) {
   return n - Math.floor(n);
 }
 
-/** Barn footprint + cabin footprint — no spawn or plant here */
+/** Barn / cabin building / water — no spawn or plant here.
+ * Horse pen, yard lawn, and dirt garden left of the house ARE plantable.
+ */
 export function isBlockedPlantSpot(x, z) {
   // Barn W=18 D=12 at origin — pad a little
   if (Math.abs(x) < 10 && Math.abs(z) < 7.5) return true;
-  // Cabin homestead + yard left of barn (center ~ -32.5, 0)
-  if (Math.hypot(x + 32.5, z - 0) < 16) return true;
-  // Fence pen rough box
-  if (x > 8.5 && x < 32 && z > -7 && z < 7) return true;
+  // Inside the log cabin only (garden + yard stay open for planting)
+  if (isInCabinBuilding(x, z, 0.9)) return true;
   // Lake
   if (isInLake(x, z, 2)) return true;
   return false;
@@ -62,7 +64,7 @@ function spawnPosition(i) {
   return { x: 25 + rand(i, 1) * 30, z: 25 + rand(i, 2) * 30 };
 }
 
-export function createFlowerState() {
+function defaultFlowerInstances() {
   const instances = [];
   for (let i = 0; i < INITIAL_FLOWER_COUNT; i++) {
     const typeId = i % FLOWER_TYPES.length;
@@ -77,13 +79,103 @@ export function createFlowerState() {
       active: true,
     });
   }
+  return instances;
+}
+
+/** Load flower positions from localStorage (moved / planted flowers). */
+export function loadFlowers() {
+  try {
+    const raw = localStorage.getItem(FLOWER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.instances)) return null;
+    const instances = parsed.instances
+      .filter(
+        (f) =>
+          f &&
+          typeof f.x === "number" &&
+          typeof f.z === "number" &&
+          typeof f.typeId === "number"
+      )
+      .map((f, i) => ({
+        id: typeof f.id === "number" ? f.id : i,
+        typeId: Math.max(
+          0,
+          Math.min(FLOWER_TYPES.length - 1, Math.floor(f.typeId))
+        ),
+        x: f.x,
+        z: f.z,
+        rot: typeof f.rot === "number" ? f.rot : 0,
+        scale:
+          typeof f.scale === "number" ? Math.max(0.5, Math.min(2, f.scale)) : 1,
+        active: f.active !== false,
+      }));
+    if (instances.length === 0) return null;
+    return {
+      heldTypeId:
+        typeof parsed.heldTypeId === "number" ? parsed.heldTypeId : null,
+      instances,
+      nextId:
+        typeof parsed.nextId === "number"
+          ? parsed.nextId
+          : Math.max(...instances.map((f) => f.id), 0) + 1,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Save active flower placements + held flower to localStorage. */
+export function saveFlowers(flowerState) {
+  if (!flowerState) return false;
+  try {
+    const active = flowerState.instances.filter((f) => f.active);
+    const payload = {
+      heldTypeId: flowerState.heldTypeId,
+      nextId: flowerState.nextId ?? Date.now(),
+      instances: active.map((f) => ({
+        id: f.id,
+        typeId: f.typeId,
+        x: Math.round(f.x * 100) / 100,
+        z: Math.round(f.z * 100) / 100,
+        rot: Math.round((f.rot ?? 0) * 1000) / 1000,
+        scale: Math.round((f.scale ?? 1) * 100) / 100,
+        active: true,
+      })),
+    };
+    localStorage.setItem(FLOWER_STORAGE_KEY, JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function createFlowerState() {
+  const saved = loadFlowers();
+  if (saved) {
+    return {
+      heldTypeId: saved.heldTypeId,
+      instances: saved.instances,
+      nextId: saved.nextId,
+      version: 0,
+    };
+  }
+  const instances = defaultFlowerInstances();
   return {
     /** Held flower type id, or null */
     heldTypeId: null,
     instances,
+    nextId: INITIAL_FLOWER_COUNT + 1,
     /** Bump to force React re-render after pick/plant */
     version: 0,
   };
+}
+
+/** Allocate a stable id for a newly planted flower */
+export function nextFlowerId(flowerState) {
+  const id = flowerState.nextId ?? Date.now();
+  flowerState.nextId = id + 1;
+  return id;
 }
 
 export function getFlowerType(typeId) {

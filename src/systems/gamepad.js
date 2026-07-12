@@ -37,6 +37,10 @@ export const DEFAULT_GAMEPAD_BINDINGS = {
   right: "gp-button-15",
   sprint: "gp-button-5", // R1
   interact: "gp-button-0", // Cross
+  mount: "gp-button-3", // Triangle
+  callHorse: "gp-button-2", // Square — whistle for horse
+  fly: "gp-button-7", // R2
+  flyDown: "gp-button-6", // L2
 };
 
 export function formatGamepadCode(code) {
@@ -124,6 +128,10 @@ export function sampleGamepadInput(settings) {
     lookY: ry,
     sprint: isGamepadActionDown(binds, "sprint", pad),
     interact: isGamepadActionDown(binds, "interact", pad),
+    mount: isGamepadActionDown(binds, "mount", pad),
+    callHorse: isGamepadActionDown(binds, "callHorse", pad),
+    fly: isGamepadActionDown(binds, "fly", pad),
+    flyDown: isGamepadActionDown(binds, "flyDown", pad),
     options: buttonPressed(pad, 9),
     connected: true,
     id: pad.id || "Gamepad",

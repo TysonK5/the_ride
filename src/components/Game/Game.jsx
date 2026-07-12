@@ -8,14 +8,20 @@ import { Props } from "../Environment/Props";
 import { Lake } from "../Environment/Lake";
 import { Fence, createGateState } from "../Environment/Fence";
 import { Birds } from "../Environment/Birds";
-import { Flowers, createFlowerState } from "../Environment/Flowers";
+import {
+  Flowers,
+  createFlowerState,
+  saveFlowers,
+} from "../Environment/Flowers";
 import {
   ValentineTown,
   createBarnDoorState,
   createCabinState,
 } from "../Town/Buildings";
 import { Player } from "../Player/Player";
-import { Horse, createRideState } from "../Horse/Horse";
+import { Horse, Unicorn, createRideState } from "../Horse/Horse";
+import { Cat, createPlayerTrackState } from "../Animals/Cat";
+import { Callie } from "../Animals/Callie";
 import { HUD } from "../UI/HUD";
 import { OptionsMenu } from "../UI/OptionsMenu";
 import { MapEditor } from "../UI/MapEditor";
@@ -35,6 +41,7 @@ import {
 function Scene({
   enabled,
   rideState,
+  unicornRideState,
   gateState,
   barnDoorState,
   cabinState,
@@ -44,6 +51,7 @@ function Scene({
   onRideHint,
   settings,
   pathDefs,
+  playerTrack,
 }) {
   return (
     <>
@@ -61,13 +69,18 @@ function Scene({
       <Birds />
       <Flowers key={flowerVersion} flowerState={flowerState} />
       <Horse rideState={rideState} />
+      <Unicorn rideState={unicornRideState} />
+      <Cat playerTrack={playerTrack} cabinState={cabinState} />
+      <Callie playerTrack={playerTrack} cabinState={cabinState} />
       <Player
         enabled={enabled}
         rideState={rideState}
+        unicornRideState={unicornRideState}
         gateState={gateState}
         barnDoorState={barnDoorState}
         cabinState={cabinState}
         flowerState={flowerState}
+        playerTrack={playerTrack}
         onFlowerChange={onFlowerChange}
         onRideHint={onRideHint}
         settings={settings}
@@ -91,15 +104,27 @@ export function Game() {
   const [flowerVersion, setFlowerVersion] = useState(0);
   const wasLockedRef = useRef(false);
 
-  const rideState = useMemo(() => createRideState([8, 0, 14]), []);
+  // Spawn inside the horse pen so they can idle-wander
+  const rideState = useMemo(
+    () => createRideState([14, 0, 0], "horse"),
+    []
+  );
+  // Light purple unicorn also in the pen
+  const unicornRideState = useMemo(
+    () => createRideState([22, 0, 2], "unicorn"),
+    []
+  );
   const gateState = useMemo(() => createGateState(), []);
   const barnDoorState = useMemo(() => createBarnDoorState(), []);
   const cabinState = useMemo(() => createCabinState(), []);
   const flowerState = useMemo(() => createFlowerState(), []);
+  const playerTrack = useMemo(() => createPlayerTrackState([0, 0, 8]), []);
 
   const handleFlowerChange = useCallback(() => {
     flowerState.version += 1;
     setFlowerVersion(flowerState.version);
+    // Persist moved / planted flower positions to localStorage
+    saveFlowers(flowerState);
   }, [flowerState]);
 
   // Apply saved audio prefs once
@@ -258,6 +283,7 @@ export function Game() {
           <Scene
             enabled={playerEnabled}
             rideState={rideState}
+            unicornRideState={unicornRideState}
             gateState={gateState}
             barnDoorState={barnDoorState}
             cabinState={cabinState}
@@ -267,6 +293,7 @@ export function Game() {
             onRideHint={setRideHint}
             settings={settings}
             pathDefs={pathDefs}
+            playerTrack={playerTrack}
           />
         </Suspense>
       </Canvas>

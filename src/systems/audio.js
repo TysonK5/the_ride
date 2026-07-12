@@ -334,23 +334,151 @@ export function sfxDismount() {
   });
 }
 
+/** Two-tone whistle to call a horse */
+export function sfxWhistle() {
+  // Rising first note
+  playTone({
+    type: "sine",
+    freq: 980,
+    freqEnd: 1480,
+    duration: 0.22,
+    gain: 0.11,
+    attack: 0.02,
+    decay: 0.18,
+  });
+  // Second chirp a beat later
+  setTimeout(() => {
+    playTone({
+      type: "sine",
+      freq: 1200,
+      freqEnd: 1680,
+      duration: 0.28,
+      gain: 0.1,
+      attack: 0.015,
+      decay: 0.24,
+    });
+  }, 160);
+  // Soft air noise under the whistle
+  playNoise({
+    duration: 0.35,
+    gain: 0.04,
+    filterType: "bandpass",
+    frequency: 1400,
+    Q: 1.2,
+    attack: 0.02,
+    decay: 0.3,
+  });
+}
+
+/**
+ * Horse drink SFX: "slurp slurp gulp ahhhh"
+ * Timed to roughly match DRINK_DURATION (~3s).
+ */
 export function sfxHorseDrink() {
-  // Soft lap / water mouth
-  for (let i = 0; i < 4; i++) {
-    const c = ensureCtx();
-    if (!c) return;
+  const c = ensureCtx();
+  if (!c || !sfxGain) return;
+
+  // --- slurp · slurp (wet mouth pulls) ---
+  const slurps = [
+    { t: 0.15, f: 280, g: 0.14 },
+    { t: 0.55, f: 320, g: 0.13 },
+    { t: 0.95, f: 260, g: 0.15 },
+    { t: 1.35, f: 300, g: 0.12 },
+  ];
+  for (const s of slurps) {
     setTimeout(() => {
+      // Wet noise
       playNoise({
-        duration: 0.12,
-        gain: 0.1,
-        filterType: "lowpass",
-        frequency: 600 + i * 40,
-        Q: 1,
+        duration: 0.18,
+        gain: s.g,
+        filterType: "bandpass",
+        frequency: 900,
+        Q: 1.4,
         attack: 0.01,
-        decay: 0.1,
+        decay: 0.14,
       });
-    }, i * 280);
+      // Low “slrrp” tone
+      playTone({
+        type: "sawtooth",
+        freq: s.f,
+        freqEnd: s.f * 0.55,
+        duration: 0.2,
+        gain: s.g * 0.55,
+        attack: 0.02,
+        decay: 0.16,
+      });
+      playTone({
+        type: "sine",
+        freq: s.f * 1.8,
+        freqEnd: s.f * 0.9,
+        duration: 0.16,
+        gain: s.g * 0.35,
+        attack: 0.015,
+        decay: 0.12,
+      });
+    }, s.t * 1000);
   }
+
+  // --- gulp · gulp (throat glugs) ---
+  const gulps = [
+    { t: 1.7, f: 140 },
+    { t: 2.05, f: 120 },
+  ];
+  for (const g of gulps) {
+    setTimeout(() => {
+      playTone({
+        type: "sine",
+        freq: g.f,
+        freqEnd: g.f * 0.7,
+        duration: 0.14,
+        gain: 0.16,
+        attack: 0.01,
+        decay: 0.12,
+      });
+      playNoise({
+        duration: 0.1,
+        gain: 0.08,
+        filterType: "lowpass",
+        frequency: 400,
+        Q: 0.8,
+        attack: 0.005,
+        decay: 0.08,
+      });
+    }, g.t * 1000);
+  }
+
+  // --- ahhhh (satisfied sigh after the drink) ---
+  setTimeout(() => {
+    // Soft breathy noise
+    playNoise({
+      duration: 0.55,
+      gain: 0.07,
+      filterType: "bandpass",
+      frequency: 1100,
+      Q: 0.6,
+      attack: 0.08,
+      decay: 0.45,
+    });
+    // Warm “ahh” vowel-ish tone
+    playTone({
+      type: "triangle",
+      freq: 220,
+      freqEnd: 180,
+      duration: 0.65,
+      gain: 0.11,
+      attack: 0.1,
+      decay: 0.55,
+    });
+    playTone({
+      type: "sine",
+      freq: 330,
+      freqEnd: 260,
+      duration: 0.55,
+      gain: 0.06,
+      attack: 0.12,
+      decay: 0.45,
+    });
+  }, 2350);
 }
 
 export function sfxFishStart() {

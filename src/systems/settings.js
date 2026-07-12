@@ -15,6 +15,10 @@ export const ACTION_DEFS = [
   { id: "right", label: "Move Right" },
   { id: "sprint", label: "Sprint / Gallop" },
   { id: "interact", label: "Interact" },
+  { id: "mount", label: "Mount / Dismount" },
+  { id: "callHorse", label: "Call Horse (whistle)" },
+  { id: "fly", label: "Unicorn Fly Up" },
+  { id: "flyDown", label: "Unicorn Fly Down" },
 ];
 
 export const DEFAULT_SETTINGS = {
@@ -37,6 +41,10 @@ export const DEFAULT_SETTINGS = {
     right: "KeyD",
     sprint: "ShiftLeft",
     interact: "KeyE",
+    mount: "KeyR",
+    callHorse: "KeyH",
+    fly: "Space",
+    flyDown: "KeyC",
   },
   gamepadBindings: { ...DEFAULT_GAMEPAD_BINDINGS },
 };

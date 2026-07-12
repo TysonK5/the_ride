@@ -3,12 +3,19 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
-import { MOUNT_RANGE, RIDE_SPEED, DRINK_DURATION } from "../Horse/Horse";
+import {
+  MOUNT_RANGE,
+  RIDE_SPEED,
+  DRINK_DURATION,
+  callNearestHorse,
+} from "../Horse/Horse";
 import { resolveCollisions, isNearShore } from "../../systems/colliders";
 import {
   getFenceColliders,
   distToGate,
   GATE_RANGE,
+  tryPushBarnGate,
+  setGateOpenFromPlayer,
 } from "../Environment/Fence";
 import {
   getBarnColliders,
@@ -62,6 +69,7 @@ import {
   sfxMount,
   sfxDismount,
   sfxHorseDrink,
+  sfxWhistle,
   sfxFishStart,
   sfxFishCast,
   sfxFishSplash,
@@ -83,6 +91,11 @@ const RUN_ANIM_SPEED = 18;
 const PLAYER_RADIUS = 0.45;
 const HORSE_RADIUS = 0.9;
 const HORSE_COLLIDER_R = 1.1;
+/** Unicorn vertical flight speeds */
+const FLY_UP_SPEED = 9;
+const FLY_DOWN_SPEED = 11;
+const FLY_GRAVITY = 6;
+const FLY_MAX_HEIGHT = 45;
 /** How close the camera can sit to the look target when fully blocked */
 const CAM_MIN_DIST = 0.55;
 /** Pull camera slightly off the hit surface toward the player */
@@ -488,7 +501,8 @@ function updateCamera(
   camDistSmoothRef
 ) {
   const idealDist = mounted ? RIDE_CAMERA_DISTANCE : CAMERA_DISTANCE;
-  const lookY = mounted ? 2.2 : 1.5;
+  // Follow player height (important when unicorn is flying)
+  const lookY = playerGroup.position.y + (mounted ? 1.5 : 1.5);
   const cosP = Math.cos(pitch);
   const sinP = Math.sin(pitch);
 
@@ -552,10 +566,12 @@ export const Player = forwardRef(function Player(
   {
     enabled,
     rideState,
+    unicornRideState,
     gateState,
     barnDoorState,
     cabinState,
     flowerState,
+    playerTrack,
     onFlowerChange,
     onRideHint,
     settings,
@@ -576,6 +592,10 @@ export const Player = forwardRef(function Player(
   const keysRef = useRef({});
   const interactPressedRef = useRef(false);
   const sprintPressedRef = useRef(false);
+  const mountPressedRef = useRef(false);
+  /** Last sample for gate push velocity; primed = false until first frame */
+  const gatePushPrevRef = useRef({ x: 0, z: 0, primed: false });
+  const callHorsePressedRef = useRef(false);
   // Local state so the hand-held mesh mounts as soon as you pick a flower
   const [heldTypeId, setHeldTypeId] = useState(
     () => flowerState?.heldTypeId ?? null
@@ -588,12 +608,13 @@ export const Player = forwardRef(function Player(
   const camDistSmoothRef = useRef(CAMERA_DISTANCE);
   const settingsRef = useRef(settings || DEFAULT_SETTINGS);
   settingsRef.current = settings || DEFAULT_SETTINGS;
-  /** { active, mode: 'mount'|'dismount', t, side: -1 left / +1 right of horse } */
+  /** { active, mode: 'mount'|'dismount', t, side, mount: rideState ref } */
   const mountAnimRef = useRef({
     active: false,
     mode: null,
     t: 0,
     side: -1,
+    mount: null,
   });
   /**
    * Pick / plant crouch animation.
@@ -655,28 +676,38 @@ export const Player = forwardRef(function Player(
     if (!groupRef.current || !enabled) return;
 
     const keys = keysRef.current;
-    const mounted = rideState?.mounted ?? false;
     const anim = mountAnimRef.current;
     const flowerAnim = flowerAnimRef.current;
     const fishing = fishingRef.current;
+    // Horse + unicorn share the same ride-state API
+    const mounts = [rideState, unicornRideState].filter(Boolean);
+    const activeRide = mounts.find((m) => m.mounted) ?? null;
+    const mounted = !!activeRide;
+    // Mount used during mount/dismount anim
+    const animMount = anim.active ? anim.mount : null;
+    const rideForAnim = animMount || activeRide || rideState;
     const busy =
       anim.active ||
       flowerAnim.active ||
       fishing.active ||
-      !!rideState?.busy;
+      mounts.some((m) => m.busy);
 
-    // Dynamic colliders: barn walls/doors + fence + horse
+    // Dynamic colliders: barn walls/doors + fence + idle mounts
     const extras = [
       ...getBarnColliders(barnDoorState),
       ...getFenceColliders(gateState),
     ];
-    if (rideState && !mounted && !anim.active) {
-      extras.push({
-        type: "circle",
-        x: rideState.position.x,
-        z: rideState.position.z,
-        r: HORSE_COLLIDER_R,
-      });
+    if (!anim.active) {
+      for (const m of mounts) {
+        if (!m.mounted) {
+          extras.push({
+            type: "circle",
+            x: m.position.x,
+            z: m.position.z,
+            r: HORSE_COLLIDER_R,
+          });
+        }
+      }
     }
 
     const px = groupRef.current.position.x;
@@ -695,19 +726,30 @@ export const Player = forwardRef(function Player(
     if (cabinState) {
       cabinState.gateOpen = cabinGateDist <= CABIN_GATE_AUTO_RANGE;
     }
-    const horseDist = rideState
-      ? groupRef.current.position.distanceTo(rideState.position)
-      : Infinity;
-    const nearHorse = !mounted && !busy && horseDist <= MOUNT_RANGE;
-    const horseX = rideState?.position.x ?? px;
-    const horseZ = rideState?.position.z ?? pz;
+    // Nearest free mount (horse or unicorn)
+    let nearMount = null;
+    let nearMountDist = Infinity;
+    if (!mounted && !busy) {
+      for (const m of mounts) {
+        if (m.busy) continue;
+        const d = groupRef.current.position.distanceTo(m.position);
+        if (d <= MOUNT_RANGE && d < nearMountDist) {
+          nearMount = m;
+          nearMountDist = d;
+        }
+      }
+    }
+    const nearHorse = !!nearMount;
+    const horseDist = nearMountDist;
+    const horseX = (activeRide || nearMount || rideState)?.position.x ?? px;
+    const horseZ = (activeRide || nearMount || rideState)?.position.z ?? pz;
     const atShore =
       mounted &&
       !busy &&
-      !rideState?.drinking &&
-      !rideState?.moving &&
+      !activeRide?.drinking &&
+      !activeRide?.moving &&
       isNearShore(horseX, horseZ, 7);
-    const drinking = !!rideState?.drinking;
+    const drinking = !!activeRide?.drinking;
     const holdingFlower = flowerState?.heldTypeId != null;
     const nearFlowerHit =
       !mounted && !busy && flowerState
@@ -744,12 +786,40 @@ export const Player = forwardRef(function Player(
         " / " +
         formatKeyCode(bindings.sprint)
       : formatKeyCode(bindings.sprint);
+    const mountKey = gp
+      ? formatBindingCode(s.gamepadBindings?.mount) +
+        " / " +
+        formatKeyCode(bindings.mount || "KeyR")
+      : formatKeyCode(bindings.mount || "KeyR");
+    const callKey = gp
+      ? formatBindingCode(s.gamepadBindings?.callHorse) +
+        " / " +
+        formatKeyCode(bindings.callHorse || "KeyH")
+      : formatKeyCode(bindings.callHorse || "KeyH");
+    const flyKey = gp
+      ? formatBindingCode(s.gamepadBindings?.fly) +
+        " / " +
+        formatKeyCode(bindings.fly || "Space")
+      : formatKeyCode(bindings.fly || "Space");
+    const flyDownKey = gp
+      ? formatBindingCode(s.gamepadBindings?.flyDown) +
+        " / " +
+        formatKeyCode(bindings.flyDown || "KeyC")
+      : formatKeyCode(bindings.flyDown || "KeyC");
 
     // --- Interact ---
     const interactDown =
       isActionDown(bindings, "interact", keys) || !!gp?.interact;
     const sprintDown =
       isActionDown(bindings, "sprint", keys) || !!gp?.sprint;
+    const mountDown =
+      isActionDown(bindings, "mount", keys) || !!gp?.mount;
+    const callHorseDown =
+      isActionDown(bindings, "callHorse", keys) || !!gp?.callHorse;
+    const flyUpDown =
+      isActionDown(bindings, "fly", keys) || !!gp?.fly;
+    const flyDownDown =
+      isActionDown(bindings, "flyDown", keys) || !!gp?.flyDown;
 
     // Fishing state machine (works while "busy" with fishing.active)
     if (interactDown && !interactPressedRef.current && fishing.active) {
@@ -787,25 +857,83 @@ export const Player = forwardRef(function Player(
     }
     sprintPressedRef.current = sprintDown;
 
+    // --- Mount / dismount (dedicated control, default R) ---
+    if (mountDown && !mountPressedRef.current && !busy && !drinking && !fishing.active) {
+      if (mounted && activeRide) {
+        // Land unicorn before dismount
+        activeRide.position.y = 0;
+        activeRide.airborne = false;
+        activeRide.justDrank = false;
+        activeRide.moving = false;
+        activeRide.sprinting = false;
+        activeRide.busy = true;
+        anim.active = true;
+        anim.mode = "dismount";
+        anim.t = 0;
+        anim.side = -1;
+        anim.mount = activeRide;
+        sfxDismount();
+      } else if (nearMount) {
+        const m = nearMount;
+        const toPlayerX = groupRef.current.position.x - m.position.x;
+        const toPlayerZ = groupRef.current.position.z - m.position.z;
+        const c = Math.cos(m.yaw);
+        const sYaw = Math.sin(m.yaw);
+        const localX = toPlayerX * c - toPlayerZ * sYaw;
+        anim.side = localX >= 0 ? 1 : -1;
+        anim.active = true;
+        anim.mode = "mount";
+        anim.t = 0;
+        anim.mount = m;
+        m.busy = true;
+        m.moving = false;
+        m.sprinting = false;
+        m.aiMode = "stand";
+        walkCycleRef.current = 0;
+        sfxMount();
+      }
+    }
+    mountPressedRef.current = mountDown;
+
+    // --- Call horse (whistle) — closest free mount only comes ---
+    if (
+      callHorseDown &&
+      !callHorsePressedRef.current &&
+      !mounted &&
+      !busy &&
+      !drinking &&
+      !fishing.active
+    ) {
+      const called = callNearestHorse(mounts, px, pz);
+      sfxWhistle();
+      if (called) {
+        // Brief HUD feedback
+        lastHintRef.current = "";
+        onRideHint?.(
+          `${called.name === "unicorn" ? "Unicorn" : "Horse"} is coming…`
+        );
+      }
+    }
+    callHorsePressedRef.current = callHorseDown;
+
+    // Keep called mount tracking the player while they approach
+    for (const m of mounts) {
+      if (m && !m.mounted && m.aiMode === "come") {
+        m.callTargetX = px;
+        m.callTargetZ = pz;
+      }
+    }
+
+    // --- Interact (doors, flowers, fishing, horse drink — not mount) ---
     if (interactDown && !interactPressedRef.current && !busy && !drinking) {
-      if (mounted && rideState) {
-        // At shore + stopped + haven't just drunk → drink; otherwise dismount
-        if (atShore && !rideState.justDrank) {
-          rideState.drinking = true;
-          rideState.drinkTimer = 0;
-          rideState.moving = false;
-          rideState.sprinting = false;
+      if (mounted && activeRide) {
+        // At shore + stopped + haven't just drunk → drink (dismount is R)
+        if (atShore && !activeRide.justDrank) {
+          activeRide.drinking = true;
+          activeRide.drinkTimer = 0;
+          activeRide.moving = false;
+          activeRide.sprinting = false;
           sfxHorseDrink();
-        } else {
-          rideState.justDrank = false;
-          rideState.moving = false;
-          rideState.sprinting = false;
-          rideState.busy = true;
-          anim.active = true;
-          anim.mode = "dismount";
-          anim.t = 0;
-          anim.side = -1;
-          sfxDismount();
         }
       } else {
         const acts = [];
@@ -881,31 +1009,8 @@ export const Player = forwardRef(function Player(
           acts.push({
             d: gateDist,
             run: () => {
-              gateState.open = !gateState.open;
+              setGateOpenFromPlayer(gateState, pz, !gateState.open);
               sfxGate();
-            },
-          });
-        }
-        if (nearHorse && rideState) {
-          acts.push({
-            d: horseDist,
-            run: () => {
-              const toPlayerX =
-                groupRef.current.position.x - rideState.position.x;
-              const toPlayerZ =
-                groupRef.current.position.z - rideState.position.z;
-              const c = Math.cos(rideState.yaw);
-              const s = Math.sin(rideState.yaw);
-              const localX = toPlayerX * c - toPlayerZ * s;
-              anim.side = localX >= 0 ? 1 : -1;
-              anim.active = true;
-              anim.mode = "mount";
-              anim.t = 0;
-              rideState.busy = true;
-              rideState.moving = false;
-              rideState.sprinting = false;
-              walkCycleRef.current = 0;
-              sfxMount();
             },
           });
         }
@@ -939,19 +1044,20 @@ export const Player = forwardRef(function Player(
     interactPressedRef.current = interactDown;
 
     // Drink timer (3s) while mounted at shore
-    if (rideState?.drinking) {
-      rideState.drinkTimer = (rideState.drinkTimer ?? 0) + delta;
-      rideState.moving = false;
-      rideState.sprinting = false;
-      if (rideState.drinkTimer >= DRINK_DURATION) {
-        rideState.drinking = false;
-        rideState.drinkTimer = 0;
-        rideState.justDrank = true; // next E dismounts even if still at shore
+    for (const m of mounts) {
+      if (m.drinking) {
+        m.drinkTimer = (m.drinkTimer ?? 0) + delta;
+        m.moving = false;
+        m.sprinting = false;
+        if (m.drinkTimer >= DRINK_DURATION) {
+          m.drinking = false;
+          m.drinkTimer = 0;
+          m.justDrank = true;
+        }
       }
-    }
-    // Clear justDrank once you leave the shore so a return visit can drink again
-    if (rideState?.justDrank && mounted && !isNearShore(horseX, horseZ, 7)) {
-      rideState.justDrank = false;
+      if (m.justDrank && m.mounted && !isNearShore(m.position.x, m.position.z, 7)) {
+        m.justDrank = false;
+      }
     }
 
     // Proximity hint
@@ -978,12 +1084,16 @@ export const Player = forwardRef(function Player(
             ? `${fishing.resultText} · ${interactKey} continue`
             : `${interactKey} continue`;
         }
-      } else if (drinking || rideState?.drinking) {
-        hint = "Horse is drinking…";
-      } else if (mounted && atShore && !rideState?.justDrank) {
-        hint = `${interactKey} to drink · hold still at water`;
+      } else if (drinking || activeRide?.drinking) {
+        hint = `${activeRide?.name === "unicorn" ? "Unicorn" : "Horse"} is drinking…`;
+      } else if (mounted && atShore && !activeRide?.justDrank && !activeRide?.airborne) {
+        hint = `${interactKey} to drink · ${mountKey} to dismount · hold still at water`;
+      } else if (mounted && activeRide?.name === "unicorn") {
+        hint = activeRide.airborne
+          ? `${flyKey} up · ${flyDownKey} down · ${mountKey} dismount · ${sprintKey} dash`
+          : `${flyKey} to fly · ${mountKey} dismount · ${sprintKey} gallop`;
       } else if (mounted) {
-        hint = `${interactKey} to dismount · ${sprintKey} to gallop`;
+        hint = `${mountKey} to dismount · ${sprintKey} to gallop`;
       } else {
         const options = [];
         if (holdingFlower) {
@@ -996,7 +1106,7 @@ export const Player = forwardRef(function Player(
           } else {
             options.push({
               d: 0,
-              text: `Can't plant here (barn / house / water)`,
+              text: `Can't plant here (barn / cabin floor / water)`,
             });
           }
         } else if (nearFlowerHit) {
@@ -1040,14 +1150,29 @@ export const Player = forwardRef(function Player(
           options.push({
             d: gateDist,
             text: gateState?.open
-              ? `${interactKey} to close gate`
-              : `${interactKey} to open gate`,
+              ? `${interactKey} to close gate · or push the leaf closed`
+              : `${interactKey} to open gate · or walk through (swings with you)`,
           });
         }
-        if (nearHorse) {
+        if (nearMount) {
+          const label =
+            nearMount.name === "unicorn" ? "unicorn" : "horse";
           options.push({
             d: horseDist,
-            text: `${interactKey} to mount horse`,
+            text: `${mountKey} to mount ${label}`,
+          });
+        }
+        // Soft prompt for whistle when a free mount exists (low priority)
+        const freeMount = mounts.find(
+          (m) => m && !m.mounted && !m.busy && !m.drinking
+        );
+        if (freeMount) {
+          const coming = mounts.some((m) => m?.aiMode === "come");
+          options.push({
+            d: 50,
+            text: coming
+              ? `${freeMount.name === "unicorn" ? "Unicorn" : "Horse"} is coming…`
+              : `${callKey} to call horse`,
           });
         }
         options.sort((a, b) => a.d - b.d);
@@ -1060,7 +1185,8 @@ export const Player = forwardRef(function Player(
     }
 
     // --- Mount / dismount animation (stirrup → leg over → seat) ---
-    if (anim.active && rideState) {
+    if (anim.active && rideForAnim) {
+      const rs = rideForAnim;
       anim.t = Math.min(1, anim.t + delta / MOUNT_ANIM_DURATION);
       const rawT = anim.mode === "dismount" ? 1 - anim.t : anim.t;
       applyMountAnimation(
@@ -1073,22 +1199,22 @@ export const Player = forwardRef(function Player(
         leftKneeRef,
         rightKneeRef,
         hatRef,
-        rideState,
+        rs,
         anim.side,
         rawT
       );
 
       if (anim.t >= 1) {
         if (anim.mode === "mount") {
-          rideState.mounted = true;
-          rideState.busy = false;
+          rs.mounted = true;
+          rs.busy = false;
           // Snap to final seat
           groupRef.current.position.set(
-            rideState.position.x,
+            rs.position.x,
             SEAT_HEIGHT,
-            rideState.position.z
+            rs.position.z
           );
-          groupRef.current.rotation.y = rideState.yaw;
+          groupRef.current.rotation.y = rs.yaw;
           applySeatedPose(
             bodyRef,
             leftArmRef,
@@ -1101,14 +1227,14 @@ export const Player = forwardRef(function Player(
             flowerState?.heldTypeId != null
           );
         } else {
-          rideState.mounted = false;
-          rideState.busy = false;
-          // Land beside horse (left side)
+          rs.mounted = false;
+          rs.busy = false;
+          // Land beside mount
           horseLocalToWorld(
-            rideState.position.x,
+            rs.position.x,
             0,
-            rideState.position.z,
-            rideState.yaw,
+            rs.position.z,
+            rs.yaw,
             anim.side * 1.45,
             0,
             0.1,
@@ -1124,8 +1250,8 @@ export const Player = forwardRef(function Player(
               ...getFenceColliders(gateState),
               {
                 type: "circle",
-                x: rideState.position.x,
-                z: rideState.position.z,
+                x: rs.position.x,
+                z: rs.position.z,
                 r: HORSE_COLLIDER_R,
               },
             ],
@@ -1146,9 +1272,16 @@ export const Player = forwardRef(function Player(
         anim.active = false;
         anim.mode = null;
         anim.t = 0;
+        anim.mount = null;
       }
 
       // Camera still follows during animation
+      if (playerTrack) {
+        playerTrack.position.copy(groupRef.current.position);
+        playerTrack.yaw = groupRef.current.rotation.y;
+        playerTrack.moving = true;
+        playerTrack.mounted = false;
+      }
       updateCamera(
         camera,
         scene,
@@ -1195,8 +1328,12 @@ export const Player = forwardRef(function Player(
           const typeId = flowerAnim.typeId ?? flowerState.heldTypeId;
           flowerState.heldTypeId = null;
           setHeldTypeId(null);
+          const id =
+            typeof flowerState.nextId === "number"
+              ? flowerState.nextId++
+              : Date.now() + Math.floor(Math.random() * 999);
           flowerState.instances.push({
-            id: Date.now() + Math.floor(Math.random() * 999),
+            id,
             typeId,
             x: flowerAnim.plantX,
             z: flowerAnim.plantZ,
@@ -1227,6 +1364,12 @@ export const Player = forwardRef(function Player(
         flowerAnim.didAction = false;
       }
 
+      if (playerTrack) {
+        playerTrack.position.copy(groupRef.current.position);
+        playerTrack.yaw = groupRef.current.rotation.y;
+        playerTrack.moving = false;
+        playerTrack.mounted = false;
+      }
       updateCamera(
         camera,
         scene,
@@ -1363,6 +1506,12 @@ export const Player = forwardRef(function Player(
         0
       );
 
+      if (playerTrack) {
+        playerTrack.position.copy(groupRef.current.position);
+        playerTrack.yaw = groupRef.current.rotation.y;
+        playerTrack.moving = false;
+        playerTrack.mounted = false;
+      }
       updateCamera(
         camera,
         scene,
@@ -1405,7 +1554,7 @@ export const Player = forwardRef(function Player(
     // Footsteps / hooves while moving
     if (mounted) {
       updateHoofsteps(
-        isMoving && !rideState?.drinking,
+        isMoving && !activeRide?.drinking,
         sprinting,
         delta
       );
@@ -1413,49 +1562,86 @@ export const Player = forwardRef(function Player(
       updateFootsteps(isMoving, sprinting, delta);
     }
 
-    if (mounted && rideState) {
+    if (mounted && activeRide) {
+      const isUnicorn = activeRide.name === "unicorn";
       // Can't ride away while drinking
-      if (rideState.drinking) {
-        rideState.moving = false;
-        rideState.sprinting = false;
+      if (activeRide.drinking) {
+        activeRide.moving = false;
+        activeRide.sprinting = false;
+        activeRide.position.y = 0;
+        activeRide.airborne = false;
       } else {
-        rideState.sprinting = sprinting && isMoving;
+        activeRide.sprinting = sprinting && isMoving;
         if (isMoving) {
-          _move.normalize().multiplyScalar(speed * delta);
-          // Axis-separated collision for smoother sliding
-          _next.copy(rideState.position);
+          const airMult = activeRide.airborne ? 1.15 : 1;
+          _move.normalize().multiplyScalar(speed * airMult * delta);
+          // Axis-separated collision for smoother sliding (XZ only)
+          _next.copy(activeRide.position);
           _next.x += _move.x;
           resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
-          _next.z = rideState.position.z + _move.z;
+          _next.z = activeRide.position.z + _move.z;
           resolveCollisions(_next, HORSE_RADIUS, extras, cabinState);
-          rideState.position.copy(_next);
-          rideState.yaw = Math.atan2(_move.x, _move.z);
-          rideState.moving = true;
+          _next.y = activeRide.position.y;
+          activeRide.position.copy(_next);
+          activeRide.yaw = Math.atan2(_move.x, _move.z);
+          activeRide.moving = true;
         } else {
-          rideState.moving = false;
-          rideState.sprinting = false;
+          activeRide.moving = false;
+          activeRide.sprinting = false;
+        }
+
+        // Unicorn flight — free of ground clamp while airborne
+        if (isUnicorn) {
+          const up = flyUpDown;
+          const down = flyDownDown;
+          const vertMult = sprinting ? 1.35 : 1;
+          if (up) {
+            activeRide.position.y += FLY_UP_SPEED * vertMult * delta;
+          } else if (down) {
+            activeRide.position.y -= FLY_DOWN_SPEED * vertMult * delta;
+          } else if (activeRide.position.y > 0.05) {
+            // Soft gravity when not holding fly keys
+            activeRide.position.y -= FLY_GRAVITY * delta;
+          }
+          activeRide.position.y = THREE.MathUtils.clamp(
+            activeRide.position.y,
+            0,
+            FLY_MAX_HEIGHT
+          );
+          activeRide.airborne = activeRide.position.y > 0.15;
+        } else {
+          activeRide.position.y = 0;
+          activeRide.airborne = false;
         }
       }
 
-      rideState.position.x = THREE.MathUtils.clamp(
-        rideState.position.x,
+      activeRide.position.x = THREE.MathUtils.clamp(
+        activeRide.position.x,
         -PLAY_HALF,
         PLAY_HALF
       );
-      rideState.position.z = THREE.MathUtils.clamp(
-        rideState.position.z,
+      activeRide.position.z = THREE.MathUtils.clamp(
+        activeRide.position.z,
         -PLAY_HALF,
         PLAY_HALF
       );
-      rideState.position.y = 0;
-      resolveCollisions(rideState.position, HORSE_RADIUS, extras, cabinState);
+      // Ground collision only when not flying
+      if (!activeRide.airborne) {
+        activeRide.position.y = 0;
+        resolveCollisions(
+          activeRide.position,
+          HORSE_RADIUS,
+          extras,
+          cabinState
+        );
+      }
 
       groupRef.current.position.set(
-        rideState.position.x,
-        SEAT_HEIGHT,
-        rideState.position.z
+        activeRide.position.x,
+        SEAT_HEIGHT + activeRide.position.y,
+        activeRide.position.z
       );
-      groupRef.current.rotation.y = rideState.yaw;
+      groupRef.current.rotation.y = activeRide.yaw;
 
       applySeatedPose(
         bodyRef,
@@ -1563,6 +1749,50 @@ export const Player = forwardRef(function Player(
       }
     }
 
+    // Share position with follower pets (cat, etc.)
+    if (playerTrack) {
+      playerTrack.position.copy(groupRef.current.position);
+      playerTrack.yaw = groupRef.current.rotation.y;
+      playerTrack.moving = mounted
+        ? !!(activeRide?.moving || activeRide?.airborne)
+        : isMoving;
+      playerTrack.mounted = mounted;
+    }
+
+    // Barn pen gate — swings open/closed with push direction (E still toggles)
+    if (gateState && !busy) {
+      const gx =
+        mounted && activeRide
+          ? activeRide.position.x
+          : groupRef.current.position.x;
+      const gz =
+        mounted && activeRide
+          ? activeRide.position.z
+          : groupRef.current.position.z;
+      const gMoving = mounted ? !!activeRide?.moving : isMoving;
+      const prev = gatePushPrevRef.current;
+      if (!prev.primed) {
+        gatePushPrevRef.current = { x: gx, z: gz, primed: true };
+      } else {
+        // Prefer live input displacement when blocked by the closed leaf
+        // so direction still reads while walking into the collider
+        let velX = gx - prev.x;
+        let velZ = gz - prev.z;
+        if (gMoving && Math.hypot(velX, velZ) < 0.0005) {
+          // _move is world wish-dir (already scaled) from this frame
+          const wishLen = Math.hypot(_move.x, _move.z);
+          if (wishLen > 0.0001) {
+            velX = _move.x;
+            velZ = _move.z;
+          }
+        }
+        if (tryPushBarnGate(gx, gz, velX, velZ, gMoving, gateState)) {
+          sfxGate();
+        }
+        gatePushPrevRef.current = { x: gx, z: gz, primed: true };
+      }
+    }
+
     updateCamera(
       camera,
       scene,
@@ -1574,6 +1804,7 @@ export const Player = forwardRef(function Player(
       camDistSmoothRef
     );
   });
+
 
   return (
     <>

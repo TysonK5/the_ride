@@ -20,6 +20,12 @@ export function HUD({
   const interactHint = b
     ? `${formatKeyCode(b.interact)} interact`
     : "E interact";
+  const mountHint = b
+    ? `${formatKeyCode(b.mount || "KeyR")} mount`
+    : "R mount";
+  const flyHint = b
+    ? `${formatKeyCode(b.fly || "Space")}/${formatKeyCode(b.flyDown || "KeyC")} fly`
+    : "Space/C fly";
   const padHint = padOn ? " · PS4 pad ok" : "";
 
   if (locked) {
@@ -29,7 +35,8 @@ export function HUD({
         <div className="hud-bottom">
           {rideHint ? <div className="hud-prompt">{rideHint}</div> : null}
           <div className="hud-controls-hint">
-            {moveHint} · {sprintHint} · {interactHint} · ESC options
+            {moveHint} · {sprintHint} · {interactHint} · {mountHint} ·{" "}
+            {flyHint} · ESC options
             {padHint}
           </div>
         </div>
@@ -69,6 +76,9 @@ export function HUD({
           <span>{b ? formatKeyCode(b.forward) : "W"}…</span> Move
           <span>{b ? formatKeyCode(b.sprint) : "Shift"}</span> Sprint
           <span>{b ? formatKeyCode(b.interact) : "E"}</span> Interact
+          <span>{b ? formatKeyCode(b.mount || "KeyR") : "R"}</span> Mount
+          <span>{b ? formatKeyCode(b.fly || "Space") : "Space"}</span> Unicorn
+          fly
           <span>ESC</span> Options
           {padOn && (
             <>

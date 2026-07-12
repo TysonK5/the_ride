@@ -33,14 +33,27 @@ const POST_SPACING = 2.4;
 const WOOD = COLORS.woodLight;
 const WOOD_DARK = COLORS.woodDark;
 
+export const GATE_OPEN_ANGLE = Math.PI / 2;
+
 export function createGateState() {
   return {
     open: false,
-    /** Current visual angle in radians (0 = closed along +X, open swings toward +Z outward) */
+    /**
+     * Swing direction when open:
+     *  -1 → leaf into pen (−Z), +1 → leaf outward (+Z)
+     * Set by player movement direction when pushing through.
+     */
+    openDir: -1,
+    /** Current visual angle in radians (0 = closed along +X) */
     angle: 0,
     targetAngle: 0,
+    /** Seconds before push-close / reverse is allowed after opening */
+    pushCooldown: 0,
   };
 }
+
+/** Proximity to the swung-open leaf to shove it closed */
+export const GATE_PUSH_CLOSE_RANGE = 1.4;
 
 function Post({ position }) {
   return (
@@ -94,13 +107,21 @@ function GateLeaf({ gateState }) {
 
   useFrame((_, delta) => {
     if (!groupRef.current || !gateState) return;
-    const target = gateState.open ? -Math.PI / 2 : 0; // swing outward (+world Z when hinge on south rail)
+    // Leaf extends along local +X from hinge. Three.js rotY:
+    //   +θ → free end toward −Z (into pen)
+    //   −θ → free end toward +Z (out of pen)
+    // openDir −1 into pen, +1 out — so target angle is −openDir * GATE_OPEN_ANGLE
+    const dir = gateState.openDir >= 0 ? 1 : -1;
+    const target = gateState.open ? -dir * GATE_OPEN_ANGLE : 0;
     gateState.targetAngle = target;
     // Smooth swing
     const cur = gateState.angle;
     const next = cur + (target - cur) * Math.min(1, delta * 6);
     gateState.angle = Math.abs(next - target) < 0.01 ? target : next;
     groupRef.current.rotation.y = gateState.angle;
+    if (gateState.pushCooldown > 0) {
+      gateState.pushCooldown = Math.max(0, gateState.pushCooldown - delta);
+    }
   });
 
   // Gate leaf local: extends along +X from hinge (closed flush with south rail which runs along X)
@@ -209,7 +230,10 @@ export function getFenceColliders(gateState) {
     { type: "box", minX: g1, maxX: x1, minZ: z1 - t, maxZ: z1 + t },
   ];
 
-  if (!gateState?.open) {
+  // Treat as open for walkthrough once swung most of the way either direction
+  const ang = gateState?.angle ?? 0;
+  const swungOpen = gateState?.open || Math.abs(ang) > 0.4;
+  if (!swungOpen) {
     // Closed gate fills the opening
     boxes.push({
       type: "box",
@@ -219,17 +243,28 @@ export function getFenceColliders(gateState) {
       maxZ: z1 + t,
     });
   } else {
-    // Open gate leaf swings to roughly -X from hinge… angle -90° from along +X
-    // Closed: leaf along +X from hinge. Open -90° Y: leaf along -Z (into pen) or +Z?
-    // rotation.y negative: right-hand, +X rotates toward -Z
-    // So open leaf occupies roughly hinge_x - t .. hinge_x + t, z from z1 - GATE_WIDTH to z1
-    boxes.push({
-      type: "box",
-      minX: GATE_HINGE_X - t,
-      maxX: GATE_HINGE_X + t,
-      minZ: GATE_Z - GATE_WIDTH,
-      maxZ: GATE_Z + t,
-    });
+    // Open leaf: +angle → into pen (−Z); −angle → outside (+Z)
+    const intoPen =
+      Math.abs(ang) > 0.12
+        ? ang > 0
+        : (gateState?.openDir ?? -1) < 0;
+    if (intoPen) {
+      boxes.push({
+        type: "box",
+        minX: GATE_HINGE_X - t,
+        maxX: GATE_HINGE_X + t,
+        minZ: GATE_Z - GATE_WIDTH,
+        maxZ: GATE_Z + t,
+      });
+    } else {
+      boxes.push({
+        type: "box",
+        minX: GATE_HINGE_X - t,
+        maxX: GATE_HINGE_X + t,
+        minZ: GATE_Z - t,
+        maxZ: GATE_Z + GATE_WIDTH,
+      });
+    }
   }
 
   return boxes;
@@ -240,4 +275,112 @@ export function distToGate(x, z) {
   const cx = GATE_MID_X;
   const cz = GATE_Z;
   return Math.hypot(x - cx, z - cz);
+}
+
+/**
+ * Infer push direction from movement:
+ *  −1 = into pen (−Z), +1 = out of pen (+Z)
+ * Gate swings the way you walk so the leaf is pushed ahead of you.
+ */
+function pushDirFromMotion(x, z, velX, velZ) {
+  // Prefer clear Z motion through the south-facing gate
+  if (Math.abs(velZ) > 0.001 && Math.abs(velZ) >= Math.abs(velX) * 0.25) {
+    // Moving +Z (out) → leaf swings out (+1); −Z (in) → leaf into pen (−1)
+    return velZ > 0 ? 1 : -1;
+  }
+  // Fallback: which side of the fence line the player is on
+  // Outside (south, +Z) → walking in → push into pen; inside → push out
+  return z > GATE_Z ? -1 : 1;
+}
+
+/**
+ * Walk into the gate to open it in your movement direction;
+ * reverse walk through the gap flips swing side; walk into the open leaf
+ * toward the closed line to shut it.
+ * velX/velZ = frame displacement (or velocity).
+ * Returns true if open state or direction changed (for SFX).
+ */
+export function tryPushBarnGate(x, z, velX, velZ, isMoving, gateState) {
+  if (!gateState || !isMoving) return false;
+
+  const inOpening =
+    x >= GATE_MID_X - GATE_WIDTH * 0.55 &&
+    x <= GATE_MID_X + GATE_WIDTH * 0.55 &&
+    z >= GATE_Z - 1.65 &&
+    z <= GATE_Z + 1.65;
+
+  const openDir = gateState.openDir >= 0 ? 1 : -1;
+  const ang = gateState.angle ?? 0;
+  const fullySwung = Math.abs(ang) > 0.55;
+  const vz = velZ ?? 0;
+  const vx = velX ?? 0;
+
+  // Open leaf hit-test (depends on which way it swung)
+  const nearOpenLeaf =
+    fullySwung &&
+    Math.abs(x - GATE_HINGE_X) < GATE_PUSH_CLOSE_RANGE &&
+    (openDir < 0
+      ? z <= GATE_Z + 0.5 && z >= GATE_Z - GATE_WIDTH - 0.45
+      : z >= GATE_Z - 0.5 && z <= GATE_Z + GATE_WIDTH + 0.45);
+
+  const pushDir = pushDirFromMotion(x, z, vx, vz);
+
+  // --- Closed → open in movement direction ---
+  if (!gateState.open && inOpening) {
+    gateState.open = true;
+    gateState.openDir = pushDir;
+    gateState.pushCooldown = 0.55;
+    return true;
+  }
+
+  if (!gateState.open) return false;
+  if ((gateState.pushCooldown ?? 0) > 0) return false;
+
+  // --- Open: reverse push through opening flips swing side (prefer over close) ---
+  if (inOpening && pushDir !== openDir) {
+    // Need clear through-gate intent (motion or crossing the fence line)
+    const reversing =
+      Math.abs(vz) > 0.001 ||
+      (openDir < 0 && z > GATE_Z + 0.15) ||
+      (openDir > 0 && z < GATE_Z - 0.15);
+    if (reversing) {
+      gateState.openDir = pushDir;
+      gateState.open = true;
+      gateState.pushCooldown = 0.35;
+      return true;
+    }
+  }
+
+  // --- Open: walk into the leaf toward the fence line to close ---
+  // Into pen (openDir −1): push leaf +Z-ward (velZ > 0) while on pen side of leaf
+  // Outward (openDir +1): push leaf −Z-ward (velZ < 0) while outside
+  if (nearOpenLeaf) {
+    const closingPush =
+      openDir < 0
+        ? vz > 0.0005 || (Math.abs(vz) <= 0.0005 && z < GATE_Z - 0.4)
+        : vz < -0.0005 || (Math.abs(vz) <= 0.0005 && z > GATE_Z + 0.4);
+    // Don't close while walking through the center gap
+    const throughGap =
+      x >= GATE_MID_X - GATE_WIDTH * 0.4 &&
+      x <= GATE_MID_X + GATE_WIDTH * 0.4 &&
+      Math.abs(z - GATE_Z) < 1.1;
+    if (closingPush && !throughGap) {
+      gateState.open = false;
+      gateState.pushCooldown = 0.45;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Set openDir from player side when toggling via interact (E). */
+export function setGateOpenFromPlayer(gateState, playerZ, open) {
+  if (!gateState) return;
+  gateState.open = open;
+  if (open) {
+    // Outside → swing into pen; inside → swing outward
+    gateState.openDir = playerZ > GATE_Z ? -1 : 1;
+  }
+  gateState.pushCooldown = open ? 0.75 : 0.4;
 }

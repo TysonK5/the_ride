@@ -3,6 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
+import { PetBowls } from "../Animals/PetBowls";
 
 export const BARN_W = 18;
 export const BARN_D = 12;
@@ -696,6 +697,9 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
       {/* 3 open horse stalls — left wall, no doors */}
       <HorseStalls />
 
+      {/* Pet food + water bowls (Callie / cat meal trips) */}
+      <PetBowls />
+
       {/* Back wall — split for sliding door opening */}
       <mesh
         position={[-(BACK_DOOR_HALF + sideBackW / 2), H / 2, backZ]}
@@ -918,7 +922,13 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
 export const CABIN_GAP = 12.5;
 export const BARN_HALF_W = 9;
 export const CABIN_YARD = {
+  /** Right yard half-width (toward barn) — also used for cabin placement */
   halfW: 11,
+  /**
+   * Left yard half-width (away from barn). Extended so a house-sized
+   * garden plot fits left of the cabin inside the picket fence.
+   */
+  leftW: 23.5,
   halfD: 10,
   front: 9.5, // fence front past porch/garden
   back: 7.5,
@@ -931,6 +941,14 @@ export const CABIN_POS = {
 export const CABIN_YAW = 0;
 export const CABIN_W = 14;
 export const CABIN_D = 11;
+/** Garden plot = same footprint as the cabin, left of the house */
+export const GARDEN_W = CABIN_W;
+export const GARDEN_D = CABIN_D;
+/** Cabin-local center of garden (left of house with a small aisle) */
+export const GARDEN_LOCAL = {
+  x: -(CABIN_W / 2 + 1.0 + GARDEN_W / 2), // -15
+  z: 0,
+};
 /** Wall eave height — roof peaks above this */
 export const CABIN_H = 4.0;
 /** Extra height of main roof peak above wall top */
@@ -999,17 +1017,38 @@ export function worldToCabinLocal(x, z) {
 }
 
 /**
- * True if a point is inside the cabin yard (house + picket fence),
+ * True if a point is inside the cabin yard (house + garden + picket fence),
  * with optional margin for tree clearance.
  */
 export function isInCabinHomestead(x, z, margin = 2.5) {
   const p = worldToCabinLocal(x, z);
   const y = CABIN_YARD;
+  const leftW = y.leftW ?? y.halfW;
   return (
-    p.x >= -y.halfW - margin &&
+    p.x >= -leftW - margin &&
     p.x <= y.halfW + margin &&
     p.z >= -y.back - margin &&
     p.z <= y.front + margin
+  );
+}
+
+/** True if point is inside the log cabin footprint (world xz). */
+export function isInCabinBuilding(x, z, margin = 0.6) {
+  const p = worldToCabinLocal(x, z);
+  return (
+    Math.abs(p.x) <= CABIN_W / 2 + margin &&
+    Math.abs(p.z) <= CABIN_D / 2 + margin
+  );
+}
+
+/** True if point is on the dirt garden plot left of the house. */
+export function isInGardenPlot(x, z, margin = 0.15) {
+  const p = worldToCabinLocal(x, z);
+  return (
+    p.x >= GARDEN_LOCAL.x - GARDEN_W / 2 - margin &&
+    p.x <= GARDEN_LOCAL.x + GARDEN_W / 2 + margin &&
+    p.z >= GARDEN_LOCAL.z - GARDEN_D / 2 - margin &&
+    p.z <= GARDEN_LOCAL.z + GARDEN_D / 2 + margin
   );
 }
 
@@ -1071,10 +1110,11 @@ export function getCabinColliders(cabinState) {
  */
 export function getCabinYardColliders(cabinState) {
   const y = CABIN_YARD;
+  const leftW = y.leftW ?? y.halfW;
   const boxes = [];
   // Front fence left / right of gate (local +Z)
   boxes.push(
-    cabinWallBox(-y.halfW, -y.gateHalf, y.front - 0.08, y.front + 0.08, 0.08)
+    cabinWallBox(-leftW, -y.gateHalf, y.front - 0.08, y.front + 0.08, 0.08)
   );
   boxes.push(
     cabinWallBox(y.gateHalf, y.halfW, y.front - 0.08, y.front + 0.08, 0.08)
@@ -1095,11 +1135,11 @@ export function getCabinYardColliders(cabinState) {
   }
   // Back
   boxes.push(
-    cabinWallBox(-y.halfW, y.halfW, -y.back - 0.08, -y.back + 0.08, 0.08)
+    cabinWallBox(-leftW, y.halfW, -y.back - 0.08, -y.back + 0.08, 0.08)
   );
   // Sides
   boxes.push(
-    cabinWallBox(-y.halfW - 0.08, -y.halfW + 0.08, -y.back, y.front, 0.08)
+    cabinWallBox(-leftW - 0.08, -leftW + 0.08, -y.back, y.front, 0.08)
   );
   boxes.push(
     cabinWallBox(y.halfW - 0.08, y.halfW + 0.08, -y.back, y.front, 0.08)
@@ -1667,12 +1707,111 @@ function PicketPanel({ length = 1.2 }) {
   );
 }
 
+/** Brown dirt mound row (elongated raised bed) for the vegetable/flower garden */
+function DirtMoundRow({ length = 12, width = 1.15, height = 0.32 }) {
+  const dirt = "#6b4428";
+  const dirtHi = "#8a5a34";
+  // Overlapping flattened spheres along the row for a soft mounded look
+  const n = Math.max(3, Math.round(length / 1.35));
+  const bumps = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1);
+    const x = (t - 0.5) * (length - width * 0.9);
+    const wobble = Math.sin(i * 2.1) * 0.06;
+    bumps.push({
+      x,
+      z: wobble,
+      sx: width * (0.85 + (i % 3) * 0.08),
+      sy: height * (0.9 + (i % 2) * 0.15),
+      sz: width * (0.75 + (i % 4) * 0.06),
+    });
+  }
+  return (
+    <group>
+      {/* Continuous soil base under bumps */}
+      <mesh position={[0, height * 0.22, 0]} castShadow receiveShadow>
+        <boxGeometry args={[length * 0.98, height * 0.35, width * 0.95]} />
+        <meshToonMaterial color={dirt} />
+      </mesh>
+      {bumps.map((b, i) => (
+        <mesh
+          key={i}
+          position={[b.x, b.sy * 0.55, b.z]}
+          scale={[b.sx, b.sy, b.sz]}
+          castShadow
+          receiveShadow
+        >
+          <sphereGeometry args={[0.5, 8, 6]} />
+          <meshToonMaterial color={i % 2 === 0 ? dirt : dirtHi} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 /**
- * White waist-high picket fence, stone path to door, flower garden beds.
+ * House-sized garden left of the cabin: soil pad + 4 rows of dirt mounds.
+ * Local to cabin group (same space as CabinYard).
+ */
+function HouseGarden() {
+  const gx = GARDEN_LOCAL.x;
+  const gz = GARDEN_LOCAL.z;
+  const pad = 0.35;
+  const wood = COLORS.woodDark;
+  // 4 rows spaced along depth (Z), each mound runs along width (X)
+  const rowCount = 4;
+  const innerD = GARDEN_D - pad * 2;
+  const rowSpacing = innerD / rowCount;
+  const rows = [];
+  for (let i = 0; i < rowCount; i++) {
+    const z = gz - innerD / 2 + rowSpacing * (i + 0.5);
+    rows.push({ z, length: GARDEN_W - pad * 2.4 });
+  }
+
+  return (
+    <group position={[gx, 0, gz]}>
+      {/* Soil footprint — same size as the house */}
+      <mesh position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[GARDEN_W, GARDEN_D]} />
+        <meshToonMaterial color="#5c3a20" />
+      </mesh>
+      <mesh position={[0, 0.055, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[GARDEN_W - 0.35, GARDEN_D - 0.35]} />
+        <meshToonMaterial color="#6e4528" />
+      </mesh>
+
+      {/* Timber border */}
+      {[
+        [0, GARDEN_D / 2 - 0.08, GARDEN_W, 0.16, 0.22],
+        [0, -GARDEN_D / 2 + 0.08, GARDEN_W, 0.16, 0.22],
+        [GARDEN_W / 2 - 0.08, 0, 0.16, GARDEN_D, 0.22],
+        [-GARDEN_W / 2 + 0.08, 0, 0.16, GARDEN_D, 0.22],
+      ].map(([x, z, w, d, h], i) => (
+        <mesh key={i} position={[x, h / 2, z]} castShadow receiveShadow>
+          <boxGeometry args={[w, h, d]} />
+          <meshToonMaterial color={wood} />
+          <Outlines color={COLORS.outline} thickness={0.6} />
+        </mesh>
+      ))}
+
+      {/* 4 rows of brown dirt mounds */}
+      {rows.map((r, i) => (
+        <group key={i} position={[0, 0.02, r.z - gz]}>
+          <DirtMoundRow length={r.length} width={1.2} height={0.34} />
+        </group>
+      ))}
+    </group>
+  );
+}
+
+/**
+ * White waist-high picket fence, stone path to door, flower beds,
+ * and house-sized dirt garden left of the cabin.
  * Gate auto-opens when the player walks through (cabinState).
  */
 function CabinYard({ cabinState }) {
   const y = CABIN_YARD;
+  const leftW = y.leftW ?? y.halfW;
   const frontZ = CABIN_D / 2;
   const white = COLORS.white;
   const leftGateRef = useRef();
@@ -1715,7 +1854,7 @@ function CabinYard({ cabinState }) {
     });
   }
 
-  // Garden flower clusters either side of path
+  // Small decorative flower clusters either side of path (porch beds)
   const flowers = [];
   const petalColors = [
     "#e85a6a",
@@ -1739,65 +1878,65 @@ function CabinYard({ cabinState }) {
     });
   }
 
-  // Fence runs: front L/R, back, left, right
-  const segs = [];
-  // Front left of gate
-  segs.push({
-    key: "fl",
-    x: (-y.halfW - y.gateHalf) / 2,
-    z: y.front,
-    rot: 0,
-    len: y.halfW - y.gateHalf,
-  });
-  // Front right of gate
-  segs.push({
-    key: "fr",
-    x: (y.halfW + y.gateHalf) / 2,
-    z: y.front,
-    rot: 0,
-    len: y.halfW - y.gateHalf,
-  });
-  // Back
-  segs.push({
-    key: "bk",
-    x: 0,
-    z: -y.back,
-    rot: 0,
-    len: y.halfW * 2,
-  });
-  // Left
-  segs.push({
-    key: "lf",
-    x: -y.halfW,
-    z: (y.front - y.back) / 2 - y.back / 2 + y.front / 2 - y.back / 2,
-    // center z of side: (-y.back + y.front) / 2
-    rot: Math.PI / 2,
-    len: y.front + y.back,
-  });
-  // Right
-  segs.push({
-    key: "rt",
-    x: y.halfW,
-    z: (-y.back + y.front) / 2,
-    rot: Math.PI / 2,
-    len: y.front + y.back,
-  });
-  // Fix left z to match right
-  segs[3].z = (-y.back + y.front) / 2;
+  const sideZ = (-y.back + y.front) / 2;
+  // Fence runs: front L/R, back, left, right (asymmetric left for garden)
+  const segs = [
+    {
+      key: "fl",
+      x: (-leftW - y.gateHalf) / 2,
+      z: y.front,
+      rot: 0,
+      len: leftW - y.gateHalf,
+    },
+    {
+      key: "fr",
+      x: (y.halfW + y.gateHalf) / 2,
+      z: y.front,
+      rot: 0,
+      len: y.halfW - y.gateHalf,
+    },
+    {
+      key: "bk",
+      x: (y.halfW - leftW) / 2,
+      z: -y.back,
+      rot: 0,
+      len: leftW + y.halfW,
+    },
+    {
+      key: "lf",
+      x: -leftW,
+      z: sideZ,
+      rot: Math.PI / 2,
+      len: y.front + y.back,
+    },
+    {
+      key: "rt",
+      x: y.halfW,
+      z: sideZ,
+      rot: Math.PI / 2,
+      len: y.front + y.back,
+    },
+  ];
+
+  const lawnW = leftW + y.halfW - 0.4;
+  const lawnX = (y.halfW - leftW) / 2;
 
   return (
     <group>
-      {/* Soft lawn patch for yard */}
+      {/* Soft lawn patch for yard (includes garden wing) */}
       <mesh
-        position={[0, 0.025, (-y.back + y.front) / 2]}
+        position={[lawnX, 0.025, sideZ]}
         rotation={[-Math.PI / 2, 0, 0]}
         receiveShadow
       >
-        <planeGeometry args={[y.halfW * 2 - 0.4, y.front + y.back - 0.4]} />
+        <planeGeometry args={[lawnW, y.front + y.back - 0.4]} />
         <meshToonMaterial color="#5aaa3a" />
       </mesh>
 
-      {/* Dirt garden beds flanking path */}
+      {/* House-sized dirt garden — left of cabin */}
+      <HouseGarden />
+
+      {/* Dirt beds flanking path (decorative) */}
       <mesh
         position={[-2.6, 0.05, frontZ + 3.6]}
         rotation={[-Math.PI / 2, 0, 0]}
@@ -1839,7 +1978,7 @@ function CabinYard({ cabinState }) {
         </mesh>
       ))}
 
-      {/* Garden flowers */}
+      {/* Porch path flowers */}
       {flowers.map((f, i) => (
         <group key={`gf-${i}`} position={[f.x, 0, f.z]} scale={f.s}>
           <mesh position={[0, f.h * 0.45, 0]}>
