@@ -23,7 +23,7 @@ export const ACTION_DEFS = [
 
 export const DEFAULT_SETTINGS = {
   mouseSensitivity: 1,
-  invertLookY: false,
+  invertLookY: true,
   invertLookX: false,
   /** Allow DualShock / standard gamepad input when a pad is connected */
   gamepadEnabled: true,

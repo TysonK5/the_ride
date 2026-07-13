@@ -6,39 +6,71 @@
 
 const STORAGE_KEY = "the-ride-paths-v1";
 
-function windingWaypoints(baseRadius, pointCount) {
-  const pts = [];
-  for (let i = 0; i < pointCount; i++) {
-    const a = (i / pointCount) * Math.PI * 2;
-    const wind =
-      22 * Math.sin(a * 2.3) +
-      14 * Math.cos(a * 4.1) +
-      8 * Math.sin(a * 6.7 + 0.8) +
-      5 * Math.cos(a * 9.2);
-    const r = baseRadius + wind;
-    pts.push([
-      Math.round(Math.cos(a) * r * 10) / 10,
-      Math.round(Math.sin(a) * r * 10) / 10,
-    ]);
-  }
-  return pts;
-}
-
-/** Default ranch trail layout (editable) */
+/**
+ * Default ranch trail layout (editable in Map Editor).
+ * Captured from local Map Editor save (localhost) so hosted builds
+ * use the same riding trails without relying on browser localStorage.
+ */
 export const DEFAULT_PATHS = [
   {
     id: "outer",
     name: "Outer loop",
     closed: true,
     width: 7.5,
-    waypoints: windingWaypoints(155, 28),
+    waypoints: [
+      [139.7, 0],
+      [130.3, 34.9],
+      [104.9, 60.5],
+      [87.4, 87.4],
+      [63.6, 110.1],
+      [33.5, 125.1],
+      [0, 109.7],
+      [-26.5, 98.7],
+      [-47.2, 81.8],
+      [-52.1, 52.1],
+      [-90.3, 52.1],
+      [-136.3, 36.5],
+      [-143.2, 0],
+      [-131.9, -35.3],
+      [-104.8, -60.5],
+      [-83.3, -83.3],
+      [-53.9, -93.4],
+      [-25.9, -96.5],
+      [0, -116.3],
+      [25.3, -94.5],
+      [59.1, -99.6],
+      [77.1, -77.1],
+      [115.1, -66.5],
+      [143.3, -38.4],
+    ],
   },
   {
     id: "inner",
     name: "Inner loop",
     closed: true,
     width: 6,
-    waypoints: windingWaypoints(95, 22),
+    waypoints: [
+      [96.7, 0],
+      [83.2, 27],
+      [63.7, 46.3],
+      [48.2, 66.3],
+      [27.1, 83.4],
+      [0, 66.7],
+      [-18.4, 56.8],
+      [-24, 33],
+      [-34.7, 25.2],
+      [-89.5, 29.1],
+      [-100.2, 0],
+      [-86.3, -28],
+      [-60.6, -44],
+      [-42, -57.8],
+      [-21.4, -66],
+      [0, -73.3],
+      [25.6, -56.6],
+      [43.2, -52.4],
+      [66.3, -48.2],
+      [98.3, -31.9],
+    ],
   },
   {
     id: "spur",
@@ -46,12 +78,10 @@ export const DEFAULT_PATHS = [
     closed: false,
     width: 6,
     waypoints: [
-      [2, 12],
-      [22, 28],
-      [48, 42],
-      [72, 58],
-      [100, 70],
-      [120, 85],
+      [0.5, 18.3],
+      [18, 22],
+      [36, 34],
+      [63.2, 46.1],
     ],
   },
   {
@@ -60,11 +90,8 @@ export const DEFAULT_PATHS = [
     closed: false,
     width: 4.5,
     waypoints: [
-      [-10, 4],
-      [-18, 2],
-      [-26, 0],
-      [-32, 0],
-      [-32.5, 6],
+      [1.5, 18.1],
+      [-33.9, 24.9],
     ],
   },
   {
@@ -73,11 +100,12 @@ export const DEFAULT_PATHS = [
     closed: false,
     width: 5.5,
     waypoints: [
-      [-4, -2],
-      [-28, -24],
-      [-55, -52],
-      [-85, -80],
-      [-110, -100],
+      [66.4, -46.9],
+      [33.4, -22.8],
+      [0.4, -11.7],
+      [-20, -18],
+      [-40, -40],
+      [-52, -48.5],
     ],
   },
 ];
