@@ -915,51 +915,88 @@ function HorseBody({ gaitRef, rideState, colors = HORSE_PALETTE, unicorn = false
       return;
     }
 
-    // Gait swing (disabled while drinking)
-    const amp = rideState?.sprinting ? 0.7 : 0.45;
-    const gaitSwing =
-      d > 0.15 ? 0 : Math.sin(gaitRef.current) * amp;
+    // --- Ground locomotion: gentle trot (walk) vs longer/faster gallop (sprint) ---
+    // Leg signs are diagonal pairs already (FL+BR, FR+BL) = natural trot.
+    const moving = !!rideState?.moving && d < 0.12;
+    const sprinting = moving && !!rideState?.sprinting;
+    const phase = gaitRef.current;
+    // 0 walk-trot → 1 gallop (also used to blend when sprinting starts/stops mid-stride)
+    const gSprint = sprinting ? 1 : 0;
 
-    // --- Front legs: mild stretch + knee bend (drink) or walk ---
-    // Keep shallow so the chest stays high enough that only the muzzle reaches water
-    const frontHip = 0.42 * d;
-    const frontKnee = 0.55 * d;
+    // Trot: moderate hip swing, soft knee fold, gentle body bob
+    // Gallop: longer reach, deeper knee, faster cadence (set on gaitRef), stiller body
+    const hipAmp = THREE.MathUtils.lerp(0.38, 0.78, gSprint);
+    const kneeAmp = THREE.MathUtils.lerp(0.32, 0.72, gSprint);
+    const reachZ = THREE.MathUtils.lerp(0.04, 0.1, gSprint);
+    const liftY = THREE.MathUtils.lerp(0.02, 0.055, gSprint);
+
+    // Drink pose overrides gait on front legs
+    const frontHipDrink = 0.42 * d;
+    const frontKneeDrink = 0.55 * d;
     const frontSpread = 0.1 * d;
-    for (const leg of [frontLegL.current, frontLegR.current]) {
-      if (!leg) continue;
-      const side = leg.userData.leg ?? 1;
-      leg.rotation.x = frontHip + gaitSwing * side;
-      leg.rotation.z = side * frontSpread;
-      leg.position.z = 0.5 + 0.1 * d;
-      leg.position.y = 0.82;
-      for (const child of leg.children) {
-        if (child.userData?.knee) child.rotation.x = frontKnee;
-      }
-    }
 
-    // Hind legs: walk or light brace while drinking
-    for (const leg of [backLegL.current, backLegR.current]) {
-      if (!leg) continue;
-      const side = leg.userData.leg ?? 1;
-      leg.rotation.x = gaitSwing * side * (1 - d) - 0.05 * d;
-      leg.rotation.z = 0;
-      leg.position.z = -0.5 - 0.04 * d;
-      leg.position.y = 0.82;
-      for (const child of leg.children) {
-        if (child.userData?.knee) child.rotation.x = 0.08 * d;
-      }
-    }
+    /**
+     * Apply one leg of a diagonal gait.
+     * hipSign: +1 / −1 from userData.leg (diagonal pairs already set on meshes).
+     * positive hip rot = swing toward horse +Z (forward for front, under belly for hind).
+     */
+    const driveLeg = (leg, baseZ, hipSign, isFront) => {
+      if (!leg) return;
+      const swing = moving ? Math.sin(phase) * hipSign : 0;
+      // Forward half of the cycle lifts the knee (air phase)
+      const air = moving ? Math.max(0, swing) : 0;
+      // Slight over-reach on the rearward half for a longer gallop stride
+      const rear = moving ? Math.max(0, -swing) : 0;
 
-    // Slight body tip only — not a full dunk
+      const hip =
+        (isFront ? frontHipDrink : -0.05 * d) +
+        swing * hipAmp * (1 - d * 0.85);
+      const knee =
+        (isFront ? frontKneeDrink : 0.08 * d) +
+        air * kneeAmp * (1 - d) +
+        rear * kneeAmp * 0.35 * gSprint * (1 - d);
+
+      leg.rotation.x = hip;
+      leg.rotation.z = isFront ? (leg.userData.leg ?? 1) * frontSpread * 0.35 : 0;
+      // Small Z reach so the hoof tracks a longer stride when galloping
+      leg.position.z =
+        baseZ +
+        (isFront ? 0.1 * d : -0.04 * d) +
+        swing * reachZ * (1 - d);
+      leg.position.y = 0.82 + air * liftY * (1 - d);
+      for (const child of leg.children) {
+        if (child.userData?.knee) child.rotation.x = knee;
+      }
+    };
+
+    driveLeg(frontLegL.current, 0.5, frontLegL.current?.userData?.leg ?? 1, true);
+    driveLeg(frontLegR.current, 0.5, frontLegR.current?.userData?.leg ?? -1, true);
+    driveLeg(backLegL.current, -0.5, backLegL.current?.userData?.leg ?? -1, false);
+    driveLeg(backLegR.current, -0.5, backLegR.current?.userData?.leg ?? 1, false);
+
+    // Body: gentle trot bob (2 peaks per stride) → nearly still when galloping
     if (torsoRef.current) {
-      torsoRef.current.position.y = -0.04 * d;
-      torsoRef.current.rotation.x = 0.07 * d;
+      const trotBob = moving
+        ? Math.abs(Math.sin(phase)) * 0.04 * (1 - gSprint)
+        : 0;
+      // Gallop keeps a tiny residual so it doesn't look frozen
+      const gallopBob = moving ? Math.sin(phase * 2) * 0.012 * gSprint : 0;
+      torsoRef.current.position.y = -0.04 * d + trotBob + gallopBob;
+      // Soft pitch on trot; flatter spine when running
+      const trotPitch = moving
+        ? Math.sin(phase * 2) * 0.035 * (1 - gSprint)
+        : 0;
+      const gallopPitch = moving ? Math.sin(phase) * 0.018 * gSprint : 0;
+      torsoRef.current.rotation.x = 0.07 * d + trotPitch + gallopPitch;
     }
 
     // Neck lowers so the mouth sits at the water surface (~y 0.12–0.2),
-    // not so far that the whole head goes under.
+    // not so far that the whole head goes under. Light trot nod when walking.
     if (neckPivotRef.current) {
-      neckPivotRef.current.rotation.x = 0.95 * d;
+      const trotNod = moving
+        ? Math.sin(phase * 2) * 0.04 * (1 - gSprint)
+        : 0;
+      neckPivotRef.current.rotation.x = 0.95 * d + trotNod;
       neckPivotRef.current.position.y = 1.22 - 0.06 * d;
       neckPivotRef.current.position.z = 0.5 + 0.1 * d;
     }
@@ -1055,9 +1092,15 @@ function HorseBody({ gaitRef, rideState, colors = HORSE_PALETTE, unicorn = false
         </group>
 
         <FlowingTail rideState={rideState} gaitRef={gaitRef} colors={colors} />
-        <Reins rideState={rideState} neckPivotRef={neckPivotRef} />
-        <WesternSaddle />
       </group>
+
+      {/*
+        Saddle + reins sit on the horse ROOT (not the bobbing torso) so the
+        seat and rein hand targets stay fixed in horse space. Rider hands IK
+        to REIN_HAND_L/R on this same frame.
+      */}
+      <WesternSaddle />
+      <Reins rideState={rideState} neckPivotRef={neckPivotRef} />
 
       {/* Legs — front bend when drinking; hind brace */}
       <Leg
@@ -1106,6 +1149,11 @@ export const SADDLE_Z = -0.05;
 export const SADDLE_FLAT_Y = 0.3;
 /** Player root Y while mounted so hips rest on the flattened seat */
 export const RIDER_SEAT_HEIGHT = 0.62;
+/**
+ * Horse-local Z of the rider root (matches saddle seat center).
+ * Keeps the player glued mid-saddle instead of at the horse origin.
+ */
+export const RIDER_SEAT_Z = SADDLE_Z;
 /**
  * Stirrup iron centers (horse-local) — boots should rest here.
  * Leather hangs from the seat-tree D-ring (see WesternSaddle).
@@ -1369,86 +1417,82 @@ function Bridle() {
   );
 }
 
-/** Reins: bit anchors under head → rider hands (or draped on neck) */
+/**
+ * Horse-local positions where rein ends meet the rider's hands while mounted.
+ * Player arm IK aims here so hands stick to the reins.
+ * (Slightly ahead of the saddle horn, hands low in front of the rider.)
+ */
+export const REIN_HAND_L = { x: -0.17, y: 1.18, z: 0.4 };
+export const REIN_HAND_R = { x: 0.17, y: 1.18, z: 0.4 };
+
+/** Reins: bit → soft swag down → back up into rider hands (or draped on neck). */
 function Reins({ rideState, neckPivotRef }) {
   const groupRef = useRef();
-  const leftRef = useRef();
-  const rightRef = useRef();
-  const leftMidRef = useRef();
-  const rightMidRef = useRef();
+  // 3 segments per side: bit→swag, swag→rise, rise→hand
+  const leftA = useRef();
+  const leftB = useRef();
+  const leftC = useRef();
+  const rightA = useRef();
+  const rightB = useRef();
+  const rightC = useRef();
 
   useFrame(() => {
     const mounted = !!rideState?.mounted;
+    // Parent is horse body root (sibling of bobbing torso) — horse-local space
     const root = groupRef.current?.parent;
     if (!root || !neckPivotRef?.current) return;
 
-    // Bit anchors are children of head group under neck pivot — get horse-local pos
     neckPivotRef.current.updateWorldMatrix(true, true);
     root.updateWorldMatrix(true, true);
 
-    // Head local bit offsets (same as Bridle bit rings)
-    _tmp.set(-0.14, -0.12, 0.48);
-    // Head is at (0, 0.55, 0.65) under neck pivot
+    // Bit anchors in neck-pivot space (head local + head offset under pivot)
+    // → world → horse root local (matches REIN_HAND_* constants)
     _bitL.set(-0.14, 0.55 - 0.12, 0.65 + 0.48);
     _bitR.set(0.14, 0.55 - 0.12, 0.65 + 0.48);
-    // Transform by neck pivot (includes drink dip) into horse body space
     neckPivotRef.current.localToWorld(_bitL);
     neckPivotRef.current.localToWorld(_bitR);
     root.worldToLocal(_bitL);
     root.worldToLocal(_bitR);
 
-    const handL = mounted
-      ? _handL.set(-0.22, 1.58, 0.35)
-      : _handL.set(-0.12, 1.42, 0.7);
-    const handR = mounted
-      ? _handR.set(0.22, 1.58, 0.35)
-      : _handR.set(0.12, 1.42, 0.7);
+    if (mounted) {
+      _handL.set(REIN_HAND_L.x, REIN_HAND_L.y, REIN_HAND_L.z);
+      _handR.set(REIN_HAND_R.x, REIN_HAND_R.y, REIN_HAND_R.z);
+    } else {
+      // Draped on the neck when not mounted
+      _handL.set(-0.12, 1.42, 0.7);
+      _handR.set(0.12, 1.42, 0.7);
+    }
 
-    const midL = _midL
-      .copy(_bitL)
-      .lerp(handL, 0.5)
-      .add(_tmp.set(mounted ? -0.04 : -0.06, mounted ? 0.05 : -0.04, 0));
-    const midR = _midR
-      .copy(_bitR)
-      .lerp(handR, 0.5)
-      .add(_tmp.set(mounted ? 0.04 : 0.06, mounted ? 0.05 : -0.04, 0));
-
-    placeReinSegment(leftRef.current, _bitL, midL);
-    placeReinSegment(leftMidRef.current, midL, handL);
-    placeReinSegment(rightRef.current, _bitR, midR);
-    placeReinSegment(rightMidRef.current, midR, handR);
+    // Soft leather swag: drop in the middle, then rise into the hands / neck
+    const sag = mounted ? 0.26 : 0.1;
+    placeReinSwag(
+      _bitL,
+      _handL,
+      -1,
+      sag,
+      leftA.current,
+      leftB.current,
+      leftC.current
+    );
+    placeReinSwag(
+      _bitR,
+      _handR,
+      1,
+      sag,
+      rightA.current,
+      rightB.current,
+      rightC.current
+    );
   });
 
   return (
     <group ref={groupRef}>
-      <mesh ref={leftRef} castShadow>
-        <capsuleGeometry args={[0.015, 1, 3, 5]} />
-        <meshToonMaterial color={REIN} />
-      </mesh>
-      <mesh ref={leftMidRef} castShadow>
-        <capsuleGeometry args={[0.015, 1, 3, 5]} />
-        <meshToonMaterial color={REIN} />
-      </mesh>
-      <mesh ref={rightRef} castShadow>
-        <capsuleGeometry args={[0.015, 1, 3, 5]} />
-        <meshToonMaterial color={REIN} />
-      </mesh>
-      <mesh ref={rightMidRef} castShadow>
-        <capsuleGeometry args={[0.015, 1, 3, 5]} />
-        <meshToonMaterial color={REIN} />
-      </mesh>
-      {rideState?.mounted && (
-        <>
-          <mesh position={[-0.22, 1.58, 0.35]} castShadow>
-            <sphereGeometry args={[0.04, 5, 5]} />
-            <meshToonMaterial color={REIN} />
-          </mesh>
-          <mesh position={[0.22, 1.58, 0.35]} castShadow>
-            <sphereGeometry args={[0.04, 5, 5]} />
-            <meshToonMaterial color={REIN} />
-          </mesh>
-        </>
-      )}
+      {[leftA, leftB, leftC, rightA, rightB, rightC].map((r, i) => (
+        <mesh key={i} ref={r} castShadow>
+          <capsuleGeometry args={[0.014, 1, 3, 5]} />
+          <meshToonMaterial color={REIN} />
+        </mesh>
+      ))}
     </group>
   );
 }
@@ -1457,18 +1501,37 @@ const _bitL = new THREE.Vector3();
 const _bitR = new THREE.Vector3();
 const _handL = new THREE.Vector3();
 const _handR = new THREE.Vector3();
-const _midL = new THREE.Vector3();
-const _midR = new THREE.Vector3();
+const _swag1 = new THREE.Vector3();
+const _swag2 = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _mid = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 const _up = new THREE.Vector3(0, 1, 0);
 
+/**
+ * Three-segment rein: bit → low swag → rise → hand.
+ * Sag drops the middle so leather swoops down then back up to the bridle/hands.
+ */
+function placeReinSwag(bit, hand, side, sag, segA, segB, segC) {
+  // Low point ~40% along the rein (deepest part of the loop)
+  _swag1.lerpVectors(bit, hand, 0.38);
+  _swag1.y -= sag;
+  _swag1.x += side * 0.035;
+  // Secondary point ~72% — rising toward the hand
+  _swag2.lerpVectors(bit, hand, 0.72);
+  _swag2.y -= sag * 0.28;
+  _swag2.x += side * 0.02;
+
+  placeReinSegment(segA, bit, _swag1);
+  placeReinSegment(segB, _swag1, _swag2);
+  placeReinSegment(segC, _swag2, hand);
+}
+
 function placeReinSegment(mesh, from, to) {
   if (!mesh) return;
   _dir.copy(to).sub(from);
-  const len = Math.max(_dir.length(), 0.05);
+  const len = Math.max(_dir.length(), 0.04);
   _mid.copy(from).add(to).multiplyScalar(0.5);
   mesh.position.copy(_mid);
   // Capsule default axis is Y — aim Y along the rein
@@ -1497,6 +1560,8 @@ export const Horse = forwardRef(function Horse(
     getPosition: () => rideState.position.clone(),
   }));
 
+  // Priority -1: run after Player so mounted mesh matches the same-frame
+  // rideState write (avoids rider appearing to slide ahead of the saddle).
   useFrame((_, delta) => {
     if (!groupRef.current || !rideState) return;
 
@@ -1527,13 +1592,14 @@ export const Horse = forwardRef(function Horse(
     groupRef.current.position.copy(rideState.position);
     groupRef.current.rotation.y = rideState.yaw;
 
+    // Cadence: gentle trot ~1.4 strides/s; gallop ~2.4 strides/s (longer, faster legs)
     if (rideState.moving) {
-      gaitRef.current += delta * (rideState.sprinting ? 22 : 12);
+      gaitRef.current += delta * (rideState.sprinting ? 15.5 : 9.2);
     } else {
-      gaitRef.current *= 0.9;
+      gaitRef.current *= 0.88;
       if (Math.abs(gaitRef.current) < 0.01) gaitRef.current = 0;
     }
-  });
+  }, -1);
 
   return (
     <group

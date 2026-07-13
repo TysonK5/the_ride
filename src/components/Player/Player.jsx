@@ -92,6 +92,9 @@ import {
 import { PLAY_HALF } from "../../systems/map";
 import {
   RIDER_SEAT_HEIGHT,
+  RIDER_SEAT_Z,
+  REIN_HAND_L,
+  REIN_HAND_R,
   STIRRUP_FOOT,
 } from "../Horse/Horse";
 import {
@@ -114,10 +117,40 @@ const CAMERA_DISTANCE = 6;
 const RIDE_CAMERA_DISTANCE = 8;
 /** Player root Y while mounted — hips rest on western saddle seat */
 const SEAT_HEIGHT = RIDER_SEAT_HEIGHT;
+/** Horse-local Z offset so the rider stays centered on the saddle */
+const SEAT_Z = RIDER_SEAT_Z;
+
+/**
+ * Snap player root to the saddle seat on the given mount (horse-local seat).
+ * Seat is fixed in horse space (saddle is NOT under the bobbing torso), so
+ * matching this transform every frame keeps the rider glued mid-saddle.
+ */
+function placeRiderOnSaddle(playerGroup, rideState) {
+  if (!playerGroup || !rideState) return;
+  const hx = rideState.position.x;
+  const hy = rideState.position.y ?? 0;
+  const hz = rideState.position.z;
+  const yaw = rideState.yaw ?? 0;
+  // Explicit local seat — no residual offsets from prior frames
+  horseLocalToWorld(hx, hy, hz, yaw, 0, SEAT_HEIGHT, SEAT_Z, _animPos);
+  playerGroup.position.x = _animPos.x;
+  playerGroup.position.y = _animPos.y;
+  playerGroup.position.z = _animPos.z;
+  playerGroup.rotation.set(0, yaw, 0);
+  playerGroup.scale.set(1, 1, 1);
+  playerGroup.updateMatrix();
+}
 
 /** Hip socket on the body (player-local) — legs stay attached here */
 const HIP_ATTACH_L = { x: -0.13, y: 0.74, z: 0.02 };
 const HIP_ATTACH_R = { x: 0.13, y: 0.74, z: 0.02 };
+/** Shoulder sockets in body-local space (arm group origins) */
+const SHOULDER_L = { x: -0.26, y: 0.33, z: 0 };
+const SHOULDER_R = { x: 0.26, y: 0.33, z: 0 };
+/** Rest length shoulder → hand center along arm −Y */
+const ARM_HAND_LEN = 0.55;
+/** Body root Y in player space while seated / standing upright */
+const BODY_Y = 0.94;
 /** Thigh length: hip origin → knee joint (matches mesh knee at y=-0.36) */
 const THIGH_LEN = 0.36;
 /** Shin length: knee → boot sole (knee at 0, shin, boot at ~-0.38) */
@@ -274,12 +307,51 @@ function stirrupPlayerLocal(isLeft) {
   return {
     x: isLeft ? -STIRRUP_FOOT.x : STIRRUP_FOOT.x,
     y: STIRRUP_FOOT.y - SEAT_HEIGHT,
-    z: STIRRUP_FOOT.z,
+    z: STIRRUP_FOOT.z - SEAT_Z,
   };
 }
 
 /**
- * Seated rider: hips glued to the pelvis sockets; boots IK'd onto stirrups.
+ * Horse-local rein-hand point → player-local (player root on saddle seat).
+ */
+function reinHandPlayerLocal(isLeft) {
+  const h = isLeft ? REIN_HAND_L : REIN_HAND_R;
+  return {
+    x: h.x,
+    y: h.y - SEAT_HEIGHT,
+    z: h.z - SEAT_Z,
+  };
+}
+
+/**
+ * Aim a single-bone arm so the hand (arm local 0,−ARM_HAND_LEN,0) reaches target.
+ * Shoulder stays in its body-local socket; target is body-local.
+ */
+function aimArmAtHand(armRef, shoulderBody, handBody, isLeft) {
+  if (!armRef?.current) return;
+  armRef.current.position.set(shoulderBody.x, shoulderBody.y, shoulderBody.z);
+  _ikDir.set(
+    handBody.x - shoulderBody.x,
+    handBody.y - shoulderBody.y,
+    handBody.z - shoulderBody.z
+  );
+  let dist = _ikDir.length();
+  if (dist < 1e-4) {
+    armRef.current.rotation.set(isLeft ? -0.55 : -0.75, 0, isLeft ? 0.2 : -0.18);
+    return;
+  }
+  // Clamp so we don't over-stretch the visual arm
+  if (dist > ARM_HAND_LEN * 1.08) {
+    _ikDir.multiplyScalar((ARM_HAND_LEN * 1.08) / dist);
+    dist = ARM_HAND_LEN * 1.08;
+  }
+  _ikDir.normalize();
+  _ikQ.setFromUnitVectors(_ikDown, _ikDir);
+  armRef.current.quaternion.copy(_ikQ);
+}
+
+/**
+ * Seated rider: boots on stirrups, hands stuck to rein ends.
  */
 function applySeatedPose(
   bodyRef,
@@ -293,19 +365,34 @@ function applySeatedPose(
   carrying = false
 ) {
   if (bodyRef.current) {
-    bodyRef.current.position.y = 0.94;
+    bodyRef.current.position.y = BODY_Y;
     bodyRef.current.rotation.x = 0.05;
     bodyRef.current.rotation.z = 0;
   }
-  if (leftArmRef.current) {
-    leftArmRef.current.rotation.set(
-      carrying ? -0.75 : -0.55,
-      carrying ? 0.28 : 0.12,
-      carrying ? 0.4 : 0.22
+
+  // Hands → rein ends (body-local targets). If carrying a flower, left hand keeps carry pose.
+  if (carrying) {
+    if (leftArmRef.current) {
+      leftArmRef.current.position.set(SHOULDER_L.x, SHOULDER_L.y, SHOULDER_L.z);
+      leftArmRef.current.rotation.set(-0.75, 0.28, 0.4);
+    }
+  } else {
+    const handL = reinHandPlayerLocal(true);
+    aimArmAtHand(
+      leftArmRef,
+      SHOULDER_L,
+      { x: handL.x, y: handL.y - BODY_Y, z: handL.z },
+      true
     );
   }
-  if (rightArmRef.current) {
-    rightArmRef.current.rotation.set(-0.75, -0.08, -0.18);
+  {
+    const handR = reinHandPlayerLocal(false);
+    aimArmAtHand(
+      rightArmRef,
+      SHOULDER_R,
+      { x: handR.x, y: handR.y - BODY_Y, z: handR.z },
+      false
+    );
   }
 
   const footL = stirrupPlayerLocal(true);
@@ -486,8 +573,8 @@ function applyMountAnimation(
   // side -1 = horse left (traditional mount), +1 = horse right
   const beside = { x: side * 1.35, y: 0, z: 0.05 };
   const stirrup = { x: side * 0.5, y: 0.55, z: 0.08 };
-  const highStirrup = { x: side * 0.2, y: SEAT_HEIGHT + 0.12, z: 0.0 };
-  const seat = { x: 0, y: SEAT_HEIGHT, z: -0.02 };
+  const highStirrup = { x: side * 0.2, y: SEAT_HEIGHT + 0.12, z: SEAT_Z };
+  const seat = { x: 0, y: SEAT_HEIGHT, z: SEAT_Z };
 
   let lx;
   let ly;
@@ -839,6 +926,20 @@ export const Player = forwardRef(function Player(
       document.removeEventListener("mousemove", onMouseMove);
     };
   }, [enabled]);
+
+  /**
+   * Late seat lock: runs after Horse mesh sync (priority -1) so the rider
+   * cannot lag a frame ahead of the saddle while the horse moves.
+   */
+  useFrame(() => {
+    if (!enabled || !groupRef.current) return;
+    const active =
+      (rideState?.mounted && rideState) ||
+      (unicornRideState?.mounted && unicornRideState) ||
+      null;
+    if (!active) return;
+    placeRiderOnSaddle(groupRef.current, active);
+  }, -2);
 
   useFrame((_, delta) => {
     if (!groupRef.current || !enabled) return;
@@ -1571,13 +1672,8 @@ export const Player = forwardRef(function Player(
         if (anim.mode === "mount") {
           rs.mounted = true;
           rs.busy = false;
-          // Snap to final seat
-          groupRef.current.position.set(
-            rs.position.x,
-            SEAT_HEIGHT,
-            rs.position.z
-          );
-          groupRef.current.rotation.y = rs.yaw;
+          // Snap to final seat (saddle center, not horse origin)
+          placeRiderOnSaddle(groupRef.current, rs);
           applySeatedPose(
             bodyRef,
             leftArmRef,
@@ -2080,12 +2176,8 @@ export const Player = forwardRef(function Player(
         applyGroundHeight(activeRide.position, prevRideY);
       }
 
-      groupRef.current.position.set(
-        activeRide.position.x,
-        SEAT_HEIGHT + activeRide.position.y,
-        activeRide.position.z
-      );
-      groupRef.current.rotation.y = activeRide.yaw;
+      // Glue rider to saddle seat every frame (same transform as horse mesh)
+      placeRiderOnSaddle(groupRef.current, activeRide);
 
       applySeatedPose(
         bodyRef,
