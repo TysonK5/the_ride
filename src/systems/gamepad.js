@@ -2,7 +2,14 @@
  * DualShock / standard Gamepad API helpers.
  * Browser mapping follows the common "standard" layout (Xbox indices),
  * labeled here with PlayStation names for the on-screen mapper.
+ * Also merges on-screen touch virtual pad (phones / tablets).
  */
+
+import {
+  getVirtualAxes,
+  isVirtualButtonDown,
+  isVirtualOptionsPressed,
+} from "./virtualGamepad";
 
 export const GAMEPAD_DEADZONE = 0.18;
 /** Radians/sec look speed at stick full deflection, sensitivity = 1 */
@@ -67,6 +74,10 @@ function applyDeadzone(v, dz = GAMEPAD_DEADZONE) {
   return sign * ((Math.abs(v) - dz) / (1 - dz));
 }
 
+function clampCombined(v) {
+  return Math.max(-1, Math.min(1, v));
+}
+
 function buttonPressed(pad, index) {
   const b = pad.buttons[index];
   if (!b) return false;
@@ -79,7 +90,7 @@ function parseButtonIndex(code) {
   return Number.isFinite(n) ? n : -1;
 }
 
-/** True if the bound gamepad control is held. */
+/** True if the bound gamepad control is held on a physical pad. */
 export function isGamepadActionDown(gamepadBindings, actionId, pad) {
   if (!pad || !gamepadBindings) return false;
   const code = gamepadBindings[actionId];
@@ -88,32 +99,59 @@ export function isGamepadActionDown(gamepadBindings, actionId, pad) {
   return buttonPressed(pad, idx);
 }
 
+/** Physical pad or virtual on-screen button for this action. */
+function isActionHeld(gamepadBindings, actionId, pad) {
+  if (isGamepadActionDown(gamepadBindings, actionId, pad)) return true;
+  const code = gamepadBindings?.[actionId];
+  if (code && isVirtualButtonDown(code)) return true;
+  return false;
+}
+
 /**
- * Sample the first connected pad into gameplay-ready values.
+ * Sample physical pad + virtual touch controls into gameplay-ready values.
  * Left stick + D-pad bindings drive move; right stick drives look.
  */
 export function sampleGamepadInput(settings) {
-  if (!settings?.gamepadEnabled) return null;
-  const pad = getFirstGamepad();
-  if (!pad) return null;
+  const touchOn = !!settings?.touchControlsEnabled;
+  const padOn = !!settings?.gamepadEnabled;
+  if (!padOn && !touchOn) return null;
 
+  const pad = padOn ? getFirstGamepad() : null;
+  if (!pad && !touchOn) return null;
+
+  return sampleFromSources(pad, settings, touchOn);
+}
+
+function sampleFromSources(pad, settings, includeVirtual) {
   const binds = settings.gamepadBindings || DEFAULT_GAMEPAD_BINDINGS;
-  const lx = applyDeadzone(pad.axes[0] ?? 0);
-  const ly = applyDeadzone(pad.axes[1] ?? 0);
-  const rx = applyDeadzone(pad.axes[2] ?? 0);
-  const ry = applyDeadzone(pad.axes[3] ?? 0);
+  const vAxes = includeVirtual
+    ? getVirtualAxes()
+    : { leftX: 0, leftY: 0, rightX: 0, rightY: 0 };
+
+  // Deadzone only on physical axes; virtual sticks are already normalized
+  const lx = clampCombined(
+    applyDeadzone(pad?.axes[0] ?? 0) + (includeVirtual ? vAxes.leftX : 0)
+  );
+  const ly = clampCombined(
+    applyDeadzone(pad?.axes[1] ?? 0) + (includeVirtual ? vAxes.leftY : 0)
+  );
+  const rx = clampCombined(
+    applyDeadzone(pad?.axes[2] ?? 0) + (includeVirtual ? vAxes.rightX : 0)
+  );
+  const ry = clampCombined(
+    applyDeadzone(pad?.axes[3] ?? 0) + (includeVirtual ? vAxes.rightY : 0)
+  );
 
   // Left stick: up is negative Y in standard mapping
   let moveX = lx;
   let moveZ = -ly; // forward when stick up
 
-  // Digital bindings (D-pad by default) add on top
-  if (isGamepadActionDown(binds, "left", pad)) moveX -= 1;
-  if (isGamepadActionDown(binds, "right", pad)) moveX += 1;
-  if (isGamepadActionDown(binds, "forward", pad)) moveZ += 1;
-  if (isGamepadActionDown(binds, "back", pad)) moveZ -= 1;
+  // Digital bindings (D-pad by default) + virtual buttons
+  if (isActionHeld(binds, "left", pad)) moveX -= 1;
+  if (isActionHeld(binds, "right", pad)) moveX += 1;
+  if (isActionHeld(binds, "forward", pad)) moveZ += 1;
+  if (isActionHeld(binds, "back", pad)) moveZ -= 1;
 
-  // Clamp combined stick + d-pad
   const len = Math.hypot(moveX, moveZ);
   if (len > 1) {
     moveX /= len;
@@ -126,15 +164,18 @@ export function sampleGamepadInput(settings) {
     moveZ,
     lookX: rx,
     lookY: ry,
-    sprint: isGamepadActionDown(binds, "sprint", pad),
-    interact: isGamepadActionDown(binds, "interact", pad),
-    mount: isGamepadActionDown(binds, "mount", pad),
-    callHorse: isGamepadActionDown(binds, "callHorse", pad),
-    fly: isGamepadActionDown(binds, "fly", pad),
-    flyDown: isGamepadActionDown(binds, "flyDown", pad),
-    options: buttonPressed(pad, 9),
-    connected: true,
-    id: pad.id || "Gamepad",
+    sprint: isActionHeld(binds, "sprint", pad),
+    interact: isActionHeld(binds, "interact", pad),
+    mount: isActionHeld(binds, "mount", pad),
+    callHorse: isActionHeld(binds, "callHorse", pad),
+    fly: isActionHeld(binds, "fly", pad),
+    flyDown: isActionHeld(binds, "flyDown", pad),
+    options:
+      (pad ? buttonPressed(pad, 9) : false) ||
+      (includeVirtual && isVirtualOptionsPressed()),
+    connected: !!(pad || includeVirtual),
+    id: pad?.id || (includeVirtual ? "Touch controller" : "Gamepad"),
+    virtual: includeVirtual,
   };
 }
 
@@ -172,8 +213,9 @@ export function gamepadConnectionLabel() {
   return `Controller connected: ${id.slice(0, 42)}`;
 }
 
-/** Options / Start button — always available for pause menu, even if gameplay pad is disabled */
+/** Options / Start button — physical pad or virtual touch menu button */
 export function isOptionsButtonPressed() {
+  if (isVirtualOptionsPressed()) return true;
   const pad = getFirstGamepad();
   if (!pad) return false;
   return buttonPressed(pad, 9);

@@ -21,6 +21,18 @@ export const ACTION_DEFS = [
   { id: "flyDown", label: "Unicorn Fly Down" },
 ];
 
+/** True on phones / tablets (coarse pointer or touch capability). */
+export function isLikelyTouchDevice() {
+  if (typeof window === "undefined") return false;
+  try {
+    if (window.matchMedia?.("(pointer: coarse)").matches) return true;
+    if (navigator.maxTouchPoints > 0) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
 export const DEFAULT_SETTINGS = {
   mouseSensitivity: 1,
   invertLookY: true,
@@ -29,6 +41,11 @@ export const DEFAULT_SETTINGS = {
   gamepadEnabled: true,
   /** Right-stick look multiplier */
   gamepadLookSensitivity: 1,
+  /**
+   * On-screen virtual controller for phones / tablets.
+   * Default is set at load time from isLikelyTouchDevice().
+   */
+  touchControlsEnabled: false,
   /** Audio */
   soundMuted: false,
   masterVolume: 0.7,
@@ -56,11 +73,22 @@ export function loadSettings() {
     if (!raw) {
       raw = localStorage.getItem("the-ride-settings-v1");
     }
-    if (!raw) return structuredClone(DEFAULT_SETTINGS);
+    if (!raw) {
+      const next = structuredClone(DEFAULT_SETTINGS);
+      next.touchControlsEnabled = isLikelyTouchDevice();
+      return next;
+    }
     const parsed = JSON.parse(raw);
+    const hasTouchPref = Object.prototype.hasOwnProperty.call(
+      parsed,
+      "touchControlsEnabled"
+    );
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      touchControlsEnabled: hasTouchPref
+        ? !!parsed.touchControlsEnabled
+        : isLikelyTouchDevice(),
       bindings: {
         ...DEFAULT_SETTINGS.bindings,
         ...(parsed.bindings || {}),
@@ -71,7 +99,9 @@ export function loadSettings() {
       },
     };
   } catch {
-    return structuredClone(DEFAULT_SETTINGS);
+    const next = structuredClone(DEFAULT_SETTINGS);
+    next.touchControlsEnabled = isLikelyTouchDevice();
+    return next;
   }
 }
 

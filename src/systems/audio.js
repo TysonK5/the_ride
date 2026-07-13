@@ -280,6 +280,28 @@ export function sfxFlowerPick() {
   });
 }
 
+/** Soft net whoosh + sparkle when catching a butterfly */
+export function sfxButterflyCatch() {
+  playNoise({
+    duration: 0.14,
+    gain: 0.1,
+    filterType: "bandpass",
+    frequency: 900,
+    Q: 0.8,
+    attack: 0.005,
+    decay: 0.12,
+  });
+  playTone({
+    type: "triangle",
+    freq: 880,
+    freqEnd: 1320,
+    duration: 0.18,
+    gain: 0.08,
+    attack: 0.01,
+    decay: 0.14,
+  });
+}
+
 export function sfxFlowerPlant() {
   playNoise({
     duration: 0.15,

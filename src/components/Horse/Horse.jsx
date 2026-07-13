@@ -3,11 +3,27 @@ import { useFrame } from "@react-three/fiber";
 import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
-import { resolveAnimalCollisions } from "../../systems/colliders";
+import {
+  resolveAnimalCollisions,
+  getGroundHeight,
+  applyGroundHeight,
+} from "../../systems/colliders";
 import {
   setAnimalBody,
   resolveAnimalOverlaps,
 } from "../../systems/animalCollision";
+import {
+  planPetPath,
+  petPushAccess,
+  tickPetAccessCooldowns,
+  segmentBlocked,
+} from "../../systems/petNav";
+import {
+  GATE_MID_X,
+  GATE_Z,
+  GATE_WIDTH,
+  PEN,
+} from "../Environment/Fence";
 
 const SADDLE = "#6b4423";
 const SADDLE_DARK = "#4a2e16";
@@ -56,8 +72,19 @@ export const RIDE_SPEED = 14;
 export const IDLE_WALK_SPEED = 2.6;
 /** How fast a called horse trots to the player */
 export const COME_SPEED = 7.2;
+/** Sprint speed when answering a distant whistle */
+export const COME_SPRINT = 11.5;
 /** Stop distance when answering a whistle */
 export const COME_ARRIVE = 2.35;
+/** Replan come path this often while the player moves */
+const COME_REPLAN = 1.15;
+/** How long stuck against a fence before jumping it */
+const STUCK_BEFORE_JUMP = 0.35;
+/** Fence-jump arc duration / peak height */
+const JUMP_DUR = 0.58;
+const JUMP_HEIGHT = 1.55;
+/** How far forward a fence jump carries */
+const JUMP_DIST = 3.8;
 /** Stop distance for casual wander targets */
 export const WANDER_ARRIVE = 1.4;
 
@@ -114,16 +141,30 @@ export function callNearestHorse(mounts, px, pz) {
       m.aiTimer = 1.5 + Math.random() * 3;
       m.moving = false;
       m.sprinting = false;
+      m.comePath = null;
+      m.jumpT = 0;
+      m.airborne = false;
+      if (m.position) applyGroundHeight(m.position);
     }
   }
 
   best.aiMode = "come";
   best.callTargetX = px;
   best.callTargetZ = pz;
-  best.aiTimer = 28;
+  best.aiTimer = 45;
   best.sprinting = false;
   best.airborne = false;
-  best.position.y = 0;
+  applyGroundHeight(best.position);
+  best.comePath = null;
+  best.comePathIndex = 0;
+  best.comeReplanT = 0;
+  best.stuckTimer = 0;
+  best.jumpT = 0;
+  best.prevX = best.position.x;
+  best.prevZ = best.position.z;
+  // Plan initial route through doors/gates
+  best.comePath = planPetPath(best.position.x, best.position.z, px, pz);
+  best.comePathIndex = 0;
   return best;
 }
 
@@ -133,60 +174,184 @@ export const IDLE_HORSE_RADIUS = 0.85;
 
 /**
  * Keep free-roaming mounts out of barn walls, cabin, and pen fence.
+ * During a fence jump, structure colliders are skipped so they clear rails.
  */
 function applyHorseWorldCollision(
   rideState,
   cabinState,
   barnDoorState,
-  gateState
+  gateState,
+  { skipStructures = false } = {}
 ) {
   if (!rideState?.position) return;
   const id = rideState.name || "horse";
   _horseCol.copy(rideState.position);
-  resolveAnimalCollisions(
-    _horseCol,
-    IDLE_HORSE_RADIUS,
-    cabinState,
-    barnDoorState,
-    gateState
-  );
+  if (!skipStructures) {
+    resolveAnimalCollisions(
+      _horseCol,
+      IDLE_HORSE_RADIUS,
+      cabinState,
+      barnDoorState,
+      gateState
+    );
+  }
   resolveAnimalOverlaps(_horseCol, IDLE_HORSE_RADIUS, id);
   rideState.position.x = _horseCol.x;
   rideState.position.z = _horseCol.z;
-  rideState.position.y = 0;
+  if (!skipStructures && !(rideState.jumpT > 0)) {
+    applyGroundHeight(rideState.position);
+  }
   setAnimalBody(id, rideState.position.x, rideState.position.z, IDLE_HORSE_RADIUS);
+}
+
+/** True if segment crosses a jumpable fence rail (not a gate opening). */
+function segmentCrossesJumpableFence(ax, az, bx, bz) {
+  const samples = 10;
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const x = ax + (bx - ax) * t;
+    const z = az + (bz - az) * t;
+    // Pen fence rails (not gate gap)
+    const { x0, x1, z0, z1 } = PEN;
+    const tPen = 0.45;
+    if (x >= x0 - tPen && x <= x1 + tPen && Math.abs(z - z0) <= tPen) return true;
+    if (z >= z0 - tPen && z <= z1 + tPen && Math.abs(x - x1) <= tPen) return true;
+    if (x >= x0 - tPen && x <= x1 + tPen && Math.abs(z - z1) <= tPen) {
+      if (Math.abs(x - GATE_MID_X) >= GATE_WIDTH * 0.52) return true;
+    }
+    // Cabin yard picket (approx — not gate gaps)
+    const cx = -32.5;
+    const front = 9.5;
+    const back = 12.5;
+    const leftW = 23.5;
+    const halfW = 11;
+    const gh = 1.1;
+    const gardenX = cx - 15;
+    const minX = cx - leftW;
+    const maxX = cx + halfW;
+    const minZ = -back;
+    const maxZ = front;
+    const tY = 0.35;
+    if (z >= minZ - tY && z <= maxZ + tY) {
+      if (Math.abs(x - minX) <= tY || Math.abs(x - maxX) <= tY) return true;
+    }
+    if (x >= minX - tY && x <= maxX + tY && Math.abs(z - maxZ) <= tY) {
+      if (Math.abs(x - cx) >= gh + 0.2 && Math.abs(x - gardenX) >= gh + 0.2)
+        return true;
+    }
+    if (x >= minX - tY && x <= maxX + tY && Math.abs(z - minZ) <= tY) {
+      if (Math.abs(x - gardenX) >= gh + 0.2) return true;
+    }
+  }
+  return false;
+}
+
+function beginHorseJump(rideState, towardX, towardZ) {
+  const dx = towardX - rideState.position.x;
+  const dz = towardZ - rideState.position.z;
+  const d = Math.hypot(dx, dz) || 1;
+  const dist = Math.min(JUMP_DIST, Math.max(2.6, d * 0.45));
+  rideState.jumpFromX = rideState.position.x;
+  rideState.jumpFromZ = rideState.position.z;
+  rideState.jumpToX = rideState.position.x + (dx / d) * dist;
+  rideState.jumpToZ = rideState.position.z + (dz / d) * dist;
+  rideState.jumpT = 0.001;
+  rideState.jumpDur = JUMP_DUR;
+  rideState.airborne = true;
+  rideState.stuckTimer = 0;
+  rideState.yaw = Math.atan2(dx, dz);
+  rideState.moving = true;
+  rideState.sprinting = true;
+}
+
+function updateHorseJump(rideState, delta) {
+  const dur = rideState.jumpDur || JUMP_DUR;
+  rideState.jumpT = (rideState.jumpT || 0) + delta;
+  const u = Math.min(1, rideState.jumpT / dur);
+  const sx = rideState.jumpFromX;
+  const sz = rideState.jumpFromZ;
+  const ex = rideState.jumpToX;
+  const ez = rideState.jumpToZ;
+  rideState.position.x = sx + (ex - sx) * u;
+  rideState.position.z = sz + (ez - sz) * u;
+  rideState.position.y = Math.sin(u * Math.PI) * JUMP_HEIGHT;
+  rideState.airborne = true;
+  rideState.moving = true;
+  if (u >= 1) {
+    rideState.jumpT = 0;
+    applyGroundHeight(rideState.position);
+    rideState.airborne = false;
+    rideState.comePath = null; // replan after landing
+    rideState.comePathIndex = 0;
+    rideState.stuckTimer = 0;
+  }
 }
 
 /**
  * Unmounted idle brain: stand / wander inside barn+pen, or come when called.
+ * Come mode pathfinds like companions, pushes doors/gates, and jumps fences.
  * Player owns position while mounted.
- * Structure colliders keep horses from clipping barn / cabin / fence.
  */
 export function updateHorseIdleAI(
   rideState,
   delta,
   cabinState = null,
   barnDoorState = null,
-  gateState = null
+  gateState = null,
+  playerX = null,
+  playerZ = null
 ) {
   if (!rideState) return;
   if (rideState.mounted || rideState.busy || rideState.drinking) {
     if (rideState.mounted && rideState.aiMode === "come") {
       rideState.aiMode = "stand";
+      rideState.comePath = null;
+      rideState.jumpT = 0;
+      rideState.airborne = false;
+      if (rideState.position) applyGroundHeight(rideState.position);
     }
     return;
   }
 
-  // --- Called: trot to player (can leave the pen via open gate) ---
+  // --- Called: pathfind to player, open doors/gates, jump fences if stuck ---
   if (rideState.aiMode === "come") {
     rideState.aiTimer -= delta;
-    const dx = rideState.callTargetX - rideState.position.x;
-    const dz = rideState.callTargetZ - rideState.position.z;
-    const dist = Math.hypot(dx, dz);
+
+    // Track player if live coords provided
+    if (playerX != null && playerZ != null) {
+      rideState.callTargetX = playerX;
+      rideState.callTargetZ = playerZ;
+    }
+    const tx = rideState.callTargetX;
+    const tz = rideState.callTargetZ;
+    const px0 = rideState.position.x;
+    const pz0 = rideState.position.z;
+    const prevX = rideState.prevX ?? px0;
+    const prevZ = rideState.prevZ ?? pz0;
+
+    // Mid-air fence jump
+    if (rideState.jumpT > 0) {
+      updateHorseJump(rideState, delta);
+      applyHorseWorldCollision(
+        rideState,
+        cabinState,
+        barnDoorState,
+        gateState,
+        { skipStructures: true }
+      );
+      rideState.prevX = rideState.position.x;
+      rideState.prevZ = rideState.position.z;
+      return;
+    }
+
+    const dist = Math.hypot(tx - px0, tz - pz0);
     if (dist < COME_ARRIVE || rideState.aiTimer <= 0) {
       rideState.aiMode = "stand";
       rideState.moving = false;
       rideState.sprinting = false;
+      rideState.airborne = false;
+      applyGroundHeight(rideState.position);
+      rideState.comePath = null;
       rideState.aiTimer = 2 + Math.random() * 4;
       applyHorseWorldCollision(
         rideState,
@@ -196,20 +361,115 @@ export function updateHorseIdleAI(
       );
       return;
     }
-    const step = Math.min(dist, COME_SPEED * delta);
-    rideState.position.x += (dx / dist) * step;
-    rideState.position.z += (dz / dist) * step;
-    rideState.position.y = 0;
-    rideState.yaw = Math.atan2(dx, dz);
+
+    // Replan path periodically or when missing
+    rideState.comeReplanT = (rideState.comeReplanT || 0) + delta;
+    if (
+      !rideState.comePath ||
+      rideState.comePath.length === 0 ||
+      rideState.comeReplanT >= COME_REPLAN
+    ) {
+      rideState.comePath = planPetPath(px0, pz0, tx, tz);
+      rideState.comePathIndex = 0;
+      rideState.comeReplanT = 0;
+    }
+
+    // Advance along waypoints
+    let path = rideState.comePath || [{ x: tx, z: tz }];
+    let idx = rideState.comePathIndex ?? 0;
+    if (idx >= path.length) {
+      path = [{ x: tx, z: tz }];
+      idx = 0;
+      rideState.comePath = path;
+      rideState.comePathIndex = 0;
+    }
+    let wp = path[idx];
+    let wdx = wp.x - px0;
+    let wdz = wp.z - pz0;
+    let wd = Math.hypot(wdx, wdz);
+    if (wd < 1.1 && idx < path.length - 1) {
+      rideState.comePathIndex = idx + 1;
+      idx += 1;
+      wp = path[idx];
+      wdx = wp.x - px0;
+      wdz = wp.z - pz0;
+      wd = Math.hypot(wdx, wdz) || 1;
+    }
+
+    // Jump fences when the next leg crosses a rail, or bee-line is fence-blocked
+    const jumpTowardX = wp.x;
+    const jumpTowardZ = wp.z;
+    const wantJump =
+      segmentCrossesJumpableFence(px0, pz0, jumpTowardX, jumpTowardZ) ||
+      (segmentBlocked(px0, pz0, tx, tz, 0.9) &&
+        segmentCrossesJumpableFence(px0, pz0, tx, tz));
+
+    if (wantJump && wd < 6.5) {
+      beginHorseJump(rideState, jumpTowardX, jumpTowardZ);
+      updateHorseJump(rideState, delta);
+      applyHorseWorldCollision(
+        rideState,
+        cabinState,
+        barnDoorState,
+        gateState,
+        { skipStructures: true }
+      );
+      rideState.prevX = rideState.position.x;
+      rideState.prevZ = rideState.position.z;
+      return;
+    }
+
+    const speed = dist > 16 ? COME_SPRINT : COME_SPEED;
+    const step = Math.min(wd || dist, speed * delta);
+    if (wd > 0.001) {
+      rideState.position.x += (wdx / wd) * step;
+      rideState.position.z += (wdz / wd) * step;
+      rideState.yaw = Math.atan2(wdx, wdz);
+    }
+    applyGroundHeight(rideState.position);
     rideState.moving = true;
     rideState.sprinting = dist > 14;
     rideState.airborne = false;
+
+    // Push doors & gates open/closed while answering the whistle
+    tickPetAccessCooldowns(delta, barnDoorState, cabinState);
+    petPushAccess(
+      rideState.position.x,
+      rideState.position.z,
+      prevX,
+      prevZ,
+      barnDoorState,
+      gateState,
+      cabinState
+    );
+
+    const beforeX = rideState.position.x;
+    const beforeZ = rideState.position.z;
     applyHorseWorldCollision(
       rideState,
       cabinState,
       barnDoorState,
       gateState
     );
+
+    // Stuck on fence / wall → jump toward player
+    const moved = Math.hypot(
+      rideState.position.x - beforeX,
+      rideState.position.z - beforeZ
+    );
+    // Also measure progress toward target this frame
+    const progress = Math.hypot(rideState.position.x - px0, rideState.position.z - pz0);
+    if (progress < step * 0.35 && step > 0.04) {
+      rideState.stuckTimer = (rideState.stuckTimer || 0) + delta;
+    } else {
+      rideState.stuckTimer = Math.max(0, (rideState.stuckTimer || 0) - delta * 0.5);
+    }
+    if ((rideState.stuckTimer || 0) >= STUCK_BEFORE_JUMP) {
+      beginHorseJump(rideState, tx, tz);
+    }
+
+    rideState.prevX = rideState.position.x;
+    rideState.prevZ = rideState.position.z;
     return;
   }
 
@@ -259,7 +519,7 @@ export function updateHorseIdleAI(
       BARN_PEN_ROAM.minZ,
       BARN_PEN_ROAM.maxZ
     );
-    rideState.position.y = 0;
+    applyGroundHeight(rideState.position);
     rideState.yaw = Math.atan2(dx, dz);
     rideState.moving = true;
     rideState.sprinting = false;
@@ -316,7 +576,7 @@ export function createRideState(initialPos = [10, 0, 12], name = "horse") {
     airborne: false,
     /**
      * Idle AI: "stand" | "wander" | "come"
-     * wander only inside barn/pen; come answers a whistle.
+     * wander only inside barn/pen; come answers a whistle with pathfinding.
      */
     aiMode: "stand",
     aiTimer: 1 + Math.random() * 4,
@@ -324,6 +584,19 @@ export function createRideState(initialPos = [10, 0, 12], name = "horse") {
     aiTargetZ: initialPos[2],
     callTargetX: initialPos[0],
     callTargetZ: initialPos[2],
+    /** Come-mode pathfinding */
+    comePath: null,
+    comePathIndex: 0,
+    comeReplanT: 0,
+    stuckTimer: 0,
+    jumpT: 0,
+    jumpDur: JUMP_DUR,
+    jumpFromX: initialPos[0],
+    jumpFromZ: initialPos[2],
+    jumpToX: initialPos[0],
+    jumpToZ: initialPos[2],
+    prevX: initialPos[0],
+    prevZ: initialPos[2],
   };
 }
 
@@ -821,143 +1094,222 @@ function HorseBody({ gaitRef, rideState, colors = HORSE_PALETTE, unicorn = false
   );
 }
 
-/** Western saddle — thin, rounded forms (less blocky) */
+/**
+ * Saddle + stirrup layout in horse-local space (used by rider IK).
+ * Horse torso capsule sits at y≈1.02 with r≈0.22 → back top ≈ 1.24.
+ * Saddle group origin sits on that back line (not floating above it).
+ * Seat is flattened 70% (scale Y = 0.3).
+ */
+export const SADDLE_Y = 1.22;
+export const SADDLE_Z = -0.05;
+/** Vertical squash for seat / tree / horn / cantle (1 - 0.7 = 0.3) */
+export const SADDLE_FLAT_Y = 0.3;
+/** Player root Y while mounted so hips rest on the flattened seat */
+export const RIDER_SEAT_HEIGHT = 0.62;
+/**
+ * Stirrup iron centers (horse-local) — boots should rest here.
+ * Leather hangs from the seat-tree D-ring (see WesternSaddle).
+ */
+export const STIRRUP_ATTACH_Y = 0.05; // local Y under seat edge
+export const STIRRUP_ATTACH_X = 0.22; // seat-tree side
+export const STIRRUP_DROP = 0.55; // attach → iron
+export const STIRRUP_FOOT = {
+  x: STIRRUP_ATTACH_X + 0.2,
+  y: SADDLE_Y + STIRRUP_ATTACH_Y - STIRRUP_DROP,
+  z: SADDLE_Z + 0.06,
+};
+
+/** Western saddle — seat flattened 70% for a lower profile on the horse */
 function WesternSaddle() {
   return (
-    <group position={[0, 1.37, -0.05]}>
-      {/* === Soft blanket pad === */}
-      <mesh position={[0, -0.02, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <capsuleGeometry args={[0.22, 0.28, 5, 10]} />
-        <meshToonMaterial color={BLANKET} />
-        <Outlines color={COLORS.outline} thickness={0.8} />
-      </mesh>
-      {/* Trim rings front/back */}
-      <mesh position={[0, -0.01, 0.26]} castShadow>
-        <torusGeometry args={[0.2, 0.015, 5, 12]} />
-        <meshToonMaterial color={BLANKET_TRIM} />
-      </mesh>
-      <mesh position={[0, -0.01, -0.26]} castShadow>
-        <torusGeometry args={[0.2, 0.015, 5, 12]} />
-        <meshToonMaterial color={BLANKET_TRIM} />
-      </mesh>
-
-      {/* === Rounded seat tree === */}
-      <mesh position={[0, 0.08, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <capsuleGeometry args={[0.16, 0.22, 5, 10]} />
-        <meshToonMaterial color={SADDLE} />
-        <Outlines color={COLORS.outline} thickness={1.2} />
-      </mesh>
-      {/* Soft seat cushion */}
-      <mesh position={[0, 0.14, 0.02]} castShadow>
-        <sphereGeometry args={[0.14, 8, 6]} />
-        <meshToonMaterial color={SADDLE_DARK} />
-      </mesh>
-
-      {/* Side skirts — thin curved leather */}
-      {[-1, 1].map((side) => (
-        <mesh
-          key={`skirt-${side}`}
-          position={[side * 0.2, 0.0, 0]}
-          rotation={[0.2, 0, side * 0.55]}
-          castShadow
-        >
-          <capsuleGeometry args={[0.08, 0.18, 4, 8]} />
-          <meshToonMaterial color={SADDLE_DARK} />
+    <group position={[0, SADDLE_Y, SADDLE_Z]}>
+      {/* Seat / blanket / horn / bags — flattened vertically by 70% */}
+      <group scale={[1, SADDLE_FLAT_Y, 1]}>
+        {/* === Soft blanket pad — rests on horse barrel === */}
+        <mesh position={[0, 0.02, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+          <capsuleGeometry args={[0.22, 0.28, 5, 10]} />
+          <meshToonMaterial color={BLANKET} />
           <Outlines color={COLORS.outline} thickness={0.8} />
         </mesh>
-      ))}
+        {/* Trim rings front/back */}
+        <mesh position={[0, 0.03, 0.26]} castShadow>
+          <torusGeometry args={[0.2, 0.015, 5, 12]} />
+          <meshToonMaterial color={BLANKET_TRIM} />
+        </mesh>
+        <mesh position={[0, 0.03, -0.26]} castShadow>
+          <torusGeometry args={[0.2, 0.015, 5, 12]} />
+          <meshToonMaterial color={BLANKET_TRIM} />
+        </mesh>
 
-      {/* === Pommel + slim horn === */}
-      <mesh position={[0, 0.14, 0.18]} castShadow>
-        <sphereGeometry args={[0.09, 7, 6]} />
-        <meshToonMaterial color={SADDLE_LIGHT} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      <mesh position={[0, 0.26, 0.18]} castShadow>
-        <capsuleGeometry args={[0.025, 0.08, 4, 6]} />
-        <meshToonMaterial color={SADDLE_DARK} />
-      </mesh>
-      <mesh position={[0, 0.33, 0.18]} castShadow>
-        <sphereGeometry args={[0.055, 7, 6]} />
-        <meshToonMaterial color={SADDLE_LIGHT} />
-        <Outlines color={COLORS.outline} thickness={0.8} />
-      </mesh>
+        {/* === Rounded seat tree === */}
+        <mesh position={[0, 0.1, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+          <capsuleGeometry args={[0.16, 0.22, 5, 10]} />
+          <meshToonMaterial color={SADDLE} />
+          <Outlines color={COLORS.outline} thickness={1.2} />
+        </mesh>
+        {/* Soft seat cushion */}
+        <mesh position={[0, 0.14, 0.02]} castShadow>
+          <sphereGeometry args={[0.14, 8, 6]} />
+          <meshToonMaterial color={SADDLE_DARK} />
+        </mesh>
 
-      {/* === Rounded cantle === */}
-      <mesh position={[0, 0.16, -0.18]} castShadow>
-        <sphereGeometry args={[0.12, 8, 6]} />
-        <meshToonMaterial color={SADDLE_LIGHT} />
-        <Outlines color={COLORS.outline} thickness={1.2} />
-      </mesh>
-      <mesh position={[0, 0.2, -0.2]} scale={[1.15, 0.55, 0.7]} castShadow>
-        <sphereGeometry args={[0.1, 7, 5]} />
-        <meshToonMaterial color={SADDLE} />
-      </mesh>
-
-      {/* === Thin cinch straps === */}
-      <mesh position={[0, -0.28, 0.04]} rotation={[0, 0, Math.PI / 2]} castShadow>
-        <capsuleGeometry args={[0.018, 0.42, 3, 6]} />
-        <meshToonMaterial color={REIN} />
-      </mesh>
-      <mesh position={[0, -0.48, 0.04]} rotation={[0, 0, Math.PI / 2]} castShadow>
-        <capsuleGeometry args={[0.015, 0.36, 3, 6]} />
-        <meshToonMaterial color={REIN} />
-      </mesh>
-      <mesh position={[0.2, -0.18, 0.06]} castShadow>
-        <sphereGeometry args={[0.035, 5, 5]} />
-        <meshToonMaterial color={COLORS.gold} />
-      </mesh>
-
-      {/* === Soft saddlebags === */}
-      {[-1, 1].map((side) => (
-        <group key={`bag-${side}`} position={[side * 0.22, 0.0, -0.38]}>
-          <mesh castShadow>
-            <sphereGeometry args={[0.11, 7, 6]} />
-            <meshToonMaterial color={BAG} />
-            <Outlines color={COLORS.outline} thickness={1} />
-          </mesh>
-          <mesh position={[0, 0.06, 0]} scale={[1.05, 0.45, 1.05]} castShadow>
-            <sphereGeometry args={[0.1, 6, 5]} />
-            <meshToonMaterial color={SADDLE_DARK} />
-          </mesh>
-          <mesh position={[0, 0.0, 0.08]} castShadow>
-            <capsuleGeometry args={[0.012, 0.08, 3, 5]} />
-            <meshToonMaterial color={REIN} />
-          </mesh>
-        </group>
-      ))}
-      {/* Slim bedroll */}
-      <mesh position={[0, 0.18, -0.34]} rotation={[0.35, 0, Math.PI / 2]} castShadow>
-        <capsuleGeometry args={[0.055, 0.22, 4, 8]} />
-        <meshToonMaterial color="#4a5a3a" />
-        <Outlines color={COLORS.outline} thickness={0.8} />
-      </mesh>
-
-      {/* === Stirrups far out so boots hang visible off the sides === */}
-      {[-1, 1].map((side) => (
-        <group key={`stirrup-${side}`} position={[side * 0.52, -0.08, 0.08]}>
-          <mesh position={[0, -0.12, 0]} castShadow>
-            <capsuleGeometry args={[0.035, 0.14, 4, 6]} />
-            <meshToonMaterial color={SADDLE} />
-          </mesh>
-          <mesh position={[0, -0.32, 0]} castShadow>
-            <capsuleGeometry args={[0.014, 0.28, 3, 5]} />
-            <meshToonMaterial color={REIN} />
-          </mesh>
+        {/* Side skirts — thin curved leather */}
+        {[-1, 1].map((side) => (
           <mesh
-            position={[0, -0.55, 0.01]}
-            rotation={[Math.PI / 2, 0, 0]}
+            key={`skirt-${side}`}
+            position={[side * 0.2, 0.0, 0]}
+            rotation={[0.2, 0, side * 0.55]}
             castShadow
           >
-            <torusGeometry args={[0.075, 0.014, 5, 12]} />
-            <meshToonMaterial color="#8a8070" />
+            <capsuleGeometry args={[0.08, 0.18, 4, 8]} />
+            <meshToonMaterial color={SADDLE_DARK} />
+            <Outlines color={COLORS.outline} thickness={0.8} />
           </mesh>
-          <mesh position={[0, -0.59, 0.01]} castShadow>
-            <capsuleGeometry args={[0.02, 0.07, 3, 5]} />
-            <meshToonMaterial color="#8a8070" />
-          </mesh>
-        </group>
-      ))}
+        ))}
+
+        {/* === Pommel + slim horn === */}
+        <mesh position={[0, 0.14, 0.18]} castShadow>
+          <sphereGeometry args={[0.09, 7, 6]} />
+          <meshToonMaterial color={SADDLE_LIGHT} />
+          <Outlines color={COLORS.outline} thickness={1} />
+        </mesh>
+        <mesh position={[0, 0.26, 0.18]} castShadow>
+          <capsuleGeometry args={[0.025, 0.08, 4, 6]} />
+          <meshToonMaterial color={SADDLE_DARK} />
+        </mesh>
+        <mesh position={[0, 0.33, 0.18]} castShadow>
+          <sphereGeometry args={[0.055, 7, 6]} />
+          <meshToonMaterial color={SADDLE_LIGHT} />
+          <Outlines color={COLORS.outline} thickness={0.8} />
+        </mesh>
+
+        {/* === Rounded cantle === */}
+        <mesh position={[0, 0.16, -0.18]} castShadow>
+          <sphereGeometry args={[0.12, 8, 6]} />
+          <meshToonMaterial color={SADDLE_LIGHT} />
+          <Outlines color={COLORS.outline} thickness={1.2} />
+        </mesh>
+        <mesh position={[0, 0.2, -0.2]} scale={[1.15, 0.55, 0.7]} castShadow>
+          <sphereGeometry args={[0.1, 7, 5]} />
+          <meshToonMaterial color={SADDLE} />
+        </mesh>
+
+        {/* === Thin cinch straps === */}
+        <mesh
+          position={[0, -0.28, 0.04]}
+          rotation={[0, 0, Math.PI / 2]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.018, 0.42, 3, 6]} />
+          <meshToonMaterial color={REIN} />
+        </mesh>
+        <mesh
+          position={[0, -0.48, 0.04]}
+          rotation={[0, 0, Math.PI / 2]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.015, 0.36, 3, 6]} />
+          <meshToonMaterial color={REIN} />
+        </mesh>
+        <mesh position={[0.2, -0.18, 0.06]} castShadow>
+          <sphereGeometry args={[0.035, 5, 5]} />
+          <meshToonMaterial color={COLORS.gold} />
+        </mesh>
+
+        {/* === Soft saddlebags === */}
+        {[-1, 1].map((side) => (
+          <group key={`bag-${side}`} position={[side * 0.22, 0.0, -0.38]}>
+            <mesh castShadow>
+              <sphereGeometry args={[0.11, 7, 6]} />
+              <meshToonMaterial color={BAG} />
+              <Outlines color={COLORS.outline} thickness={1} />
+            </mesh>
+            <mesh position={[0, 0.06, 0]} scale={[1.05, 0.45, 1.05]} castShadow>
+              <sphereGeometry args={[0.1, 6, 5]} />
+              <meshToonMaterial color={SADDLE_DARK} />
+            </mesh>
+            <mesh position={[0, 0.0, 0.08]} castShadow>
+              <capsuleGeometry args={[0.012, 0.08, 3, 5]} />
+              <meshToonMaterial color={REIN} />
+            </mesh>
+          </group>
+        ))}
+        {/* Slim bedroll */}
+        <mesh
+          position={[0, 0.18, -0.34]}
+          rotation={[0.35, 0, Math.PI / 2]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.055, 0.22, 4, 8]} />
+          <meshToonMaterial color="#4a5a3a" />
+          <Outlines color={COLORS.outline} thickness={0.8} />
+        </mesh>
+      </group>
+
+      {/* === Stirrups — leather hangs from D-ring on the seat tree === */}
+      {[-1, 1].map((side) => {
+        const ax = side * STIRRUP_ATTACH_X;
+        const drop = STIRRUP_DROP;
+        const ironX = side * 0.2; // out from attach toward free hanging
+        return (
+          <group
+            key={`stirrup-${side}`}
+            position={[ax, STIRRUP_ATTACH_Y, 0.06]}
+          >
+            {/* Metal D-ring fixed to the saddle tree / bar */}
+            <mesh
+              position={[0, 0.02, 0]}
+              rotation={[0, 0, Math.PI / 2]}
+              castShadow
+            >
+              <torusGeometry args={[0.045, 0.012, 5, 10]} />
+              <meshToonMaterial color="#8a8070" />
+              <Outlines color={COLORS.outline} thickness={0.5} />
+            </mesh>
+            {/* Short keeper strap from seat into the ring */}
+            <mesh
+              position={[side * -0.04, 0.06, 0]}
+              rotation={[0, 0, side * 0.5]}
+              castShadow
+            >
+              <boxGeometry args={[0.06, 0.1, 0.03]} />
+              <meshToonMaterial color={SADDLE_DARK} />
+            </mesh>
+            {/* Fender flap under the seat edge */}
+            <mesh
+              position={[side * 0.04, -0.1, 0.01]}
+              rotation={[0.15, 0, side * 0.25]}
+              castShadow
+            >
+              <capsuleGeometry args={[0.04, 0.14, 4, 6]} />
+              <meshToonMaterial color={SADDLE} />
+              <Outlines color={COLORS.outline} thickness={0.5} />
+            </mesh>
+            {/* Main stirrup leather — continuous from ring down to iron */}
+            <mesh
+              position={[ironX * 0.45, -drop * 0.45, 0]}
+              rotation={[0, 0, side * 0.22]}
+              castShadow
+            >
+              <capsuleGeometry args={[0.016, drop * 0.75, 3, 5]} />
+              <meshToonMaterial color={REIN} />
+              <Outlines color={COLORS.outline} thickness={0.4} />
+            </mesh>
+            {/* Iron (foot plate) — matches STIRRUP_FOOT */}
+            <group position={[ironX, -drop, 0.01]}>
+              <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+                <torusGeometry args={[0.075, 0.014, 5, 12]} />
+                <meshToonMaterial color="#8a8070" />
+                <Outlines color={COLORS.outline} thickness={0.5} />
+              </mesh>
+              <mesh position={[0, -0.04, 0]} castShadow>
+                <capsuleGeometry args={[0.02, 0.07, 3, 5]} />
+                <meshToonMaterial color="#8a8070" />
+              </mesh>
+            </group>
+          </group>
+        );
+      })}
     </group>
   );
 }
@@ -1134,6 +1486,7 @@ export const Horse = forwardRef(function Horse(
     cabinState = null,
     barnDoorState = null,
     gateState = null,
+    playerTrack = null,
   },
   ref
 ) {
@@ -1147,13 +1500,18 @@ export const Horse = forwardRef(function Horse(
   useFrame((_, delta) => {
     if (!groupRef.current || !rideState) return;
 
+    const ptx = playerTrack?.position?.x;
+    const ptz = playerTrack?.position?.z;
+
     // Free-roam / answer whistle when not under player control
     updateHorseIdleAI(
       rideState,
       delta,
       cabinState,
       barnDoorState,
-      gateState
+      gateState,
+      ptx,
+      ptz
     );
 
     // Mounted horses still register a body so pets don't walk through them
@@ -1195,7 +1553,7 @@ export const Horse = forwardRef(function Horse(
 
 /** Light purple unicorn — same ride logic, rainbow horn */
 export const Unicorn = forwardRef(function Unicorn(
-  { rideState, cabinState, barnDoorState, gateState },
+  { rideState, cabinState, barnDoorState, gateState, playerTrack },
   ref
 ) {
   return (
@@ -1207,6 +1565,7 @@ export const Unicorn = forwardRef(function Unicorn(
       cabinState={cabinState}
       barnDoorState={barnDoorState}
       gateState={gateState}
+      playerTrack={playerTrack}
     />
   );
 });

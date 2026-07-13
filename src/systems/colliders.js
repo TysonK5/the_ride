@@ -3,8 +3,132 @@ import {
   getBarnColliders,
   getCabinColliders,
   getCabinYardColliders,
+  BARN_W,
+  BARN_D,
+  CABIN_POS,
+  CABIN_W,
+  CABIN_D,
+  PATIO_W,
+  PATIO_D,
+  GARDEN_LOCAL,
+  GARDEN_W,
+  GARDEN_D,
 } from "../components/Town/Buildings";
 import { getFenceColliders } from "../components/Environment/Fence";
+import { DOCK, isOnDock } from "../components/Environment/Dock";
+
+/**
+ * Walkable raised floors (top surface Y). Default ground is 0.
+ * Used so the player/horse stand ON barn, cabin, patio, garden, porch
+ * instead of clipping under their mesh floors.
+ */
+export const FLOOR_HEIGHTS = {
+  ground: 0,
+  barn: 0.05,
+  cabin: 0.08,
+  porch: 0.16,
+  patio: 0.14,
+  garden: 0.06,
+  dock: DOCK.deckY,
+};
+
+/** Max vertical step the player can take between surfaces (all our floors are low). */
+export const MAX_STEP_HEIGHT = 0.55;
+
+function inAabb(x, z, minX, maxX, minZ, maxZ) {
+  return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+}
+
+/**
+ * World-space ground height under (x, z). Takes the highest surface that
+ * contains the point so stacked pads (e.g. porch near cabin) resolve correctly.
+ */
+export function getGroundHeight(x, z) {
+  let h = FLOOR_HEIGHTS.ground;
+
+  // --- Barn interior dirt floor (map center) ---
+  const bhw = BARN_W / 2 - 0.2;
+  const bhd = BARN_D / 2 - 0.2;
+  if (inAabb(x, z, -bhw, bhw, -bhd, bhd)) {
+    h = Math.max(h, FLOOR_HEIGHTS.barn);
+  }
+
+  // Cabin-local coords (yaw = 0)
+  const lx = x - CABIN_POS.x;
+  const lz = z - CABIN_POS.z;
+
+  // --- Cabin interior floor ---
+  const chw = CABIN_W / 2 - 0.15;
+  const chd = CABIN_D / 2 - 0.15;
+  if (inAabb(lx, lz, -chw, chw, -chd, chd)) {
+    h = Math.max(h, FLOOR_HEIGHTS.cabin);
+  }
+
+  // --- Front porch deck (local, in front of cabin) ---
+  const porchZ0 = CABIN_D / 2 + 0.15;
+  const porchZ1 = CABIN_D / 2 + 2.2;
+  const porchHalfW = (CABIN_W * 0.85) / 2;
+  if (inAabb(lx, lz, -porchHalfW, porchHalfW, porchZ0, porchZ1)) {
+    h = Math.max(h, FLOOR_HEIGHTS.porch);
+  }
+
+  // --- Back patio deck (full cabin width × 50% depth) ---
+  const patioZ0 = -CABIN_D / 2 - PATIO_D - 0.05;
+  const patioZ1 = -CABIN_D / 2 + 0.15;
+  const patioHalfW = PATIO_W / 2 + 0.05;
+  if (inAabb(lx, lz, -patioHalfW, patioHalfW, patioZ0, patioZ1)) {
+    h = Math.max(h, FLOOR_HEIGHTS.patio);
+  }
+
+  // --- Garden dirt pad (left of cabin) ---
+  const gx = GARDEN_LOCAL.x;
+  const gz = GARDEN_LOCAL.z;
+  if (
+    inAabb(
+      lx,
+      lz,
+      gx - GARDEN_W / 2,
+      gx + GARDEN_W / 2,
+      gz - GARDEN_D / 2,
+      gz + GARDEN_D / 2
+    )
+  ) {
+    h = Math.max(h, FLOOR_HEIGHTS.garden);
+  }
+
+  // --- Lake fishing dock ---
+  if (isOnDock(x, z)) {
+    h = Math.max(h, FLOOR_HEIGHTS.dock);
+  }
+
+  return h;
+}
+
+/**
+ * Snap / step a position onto the walkable ground at its XZ.
+ * Mutates and returns `position`. Use when not flying.
+ *
+ * @param {THREE.Vector3} position
+ * @param {number} [prevY] previous frame Y (for step limiting)
+ * @param {{ maxStepUp?: number, maxStepDown?: number }} [opts]
+ */
+export function applyGroundHeight(position, prevY = null, opts = {}) {
+  const maxUp = opts.maxStepUp ?? MAX_STEP_HEIGHT;
+  const maxDown = opts.maxStepDown ?? 2.5;
+  const target = getGroundHeight(position.x, position.z);
+  const from = prevY == null ? position.y : prevY;
+  const dy = target - from;
+
+  if (dy > maxUp) {
+    // Unreachable ledge — keep previous height (XZ collision should keep us out)
+    position.y = from;
+  } else if (dy < -maxDown) {
+    position.y = target; // long drop still lands on ground
+  } else {
+    position.y = target;
+  }
+  return position;
+}
 
 /** Axis-aligned box on XZ plane: { type:'box', minX, maxX, minZ, maxZ } */
 /** Circle on XZ: { type:'circle', x, z, r } */
@@ -160,6 +284,10 @@ export function resolveCollisions(
   // Iterate twice so stacked overlaps settle
   for (let pass = 0; pass < 2; pass++) {
     for (const c of STATIC) {
+      // Walkable dock sits over the lake — skip water push-out there
+      if (c.type === "ellipse" && c === LAKE && isOnDock(x, z, radius + 0.2)) {
+        continue;
+      }
       let out;
       if (c.type === "box") out = pushOutOfBox(x, z, radius, c);
       else if (c.type === "circle") out = pushOutOfCircle(x, z, radius, c);

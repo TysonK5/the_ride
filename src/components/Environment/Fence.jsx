@@ -29,6 +29,9 @@ export const GATE_HINGE_X = GATE_MID_X - GATE_WIDTH / 2;
 
 const POST_H = 1.25;
 const RAIL_YS = [0.3, 0.65, 1.0];
+/** Gate leaf is 30% taller than regular fence so openings read clearly */
+const GATE_H = POST_H * 1.3;
+const GATE_RAIL_YS = RAIL_YS.map((y) => y * 1.3);
 const POST_SPACING = 2.4;
 const WOOD = COLORS.woodLight;
 const WOOD_DARK = COLORS.woodDark;
@@ -55,10 +58,10 @@ export function createGateState() {
 /** Proximity to the swung-open leaf to shove it closed */
 export const GATE_PUSH_CLOSE_RANGE = 1.4;
 
-function Post({ position }) {
+function Post({ position, height = POST_H }) {
   return (
     <mesh position={position} castShadow>
-      <boxGeometry args={[0.16, POST_H, 0.16]} />
+      <boxGeometry args={[0.16, height, 0.16]} />
       <meshToonMaterial color={WOOD_DARK} />
       <Outlines color={COLORS.outline} thickness={1} />
     </mesh>
@@ -131,18 +134,24 @@ function GateLeaf({ gateState }) {
   // Hinge group at (GATE_HINGE_X, GATE_Z), world +X is along the fence. Leaf meshes extend +X.
   return (
     <group ref={groupRef} position={[GATE_HINGE_X, 0, GATE_Z]}>
-      {/* Gate posts (leaf frame) */}
-      <mesh position={[0.08, POST_H / 2, 0]} castShadow>
-        <boxGeometry args={[0.14, POST_H, 0.14]} />
+      {/* Gate posts (leaf frame) — taller than fence so the opening is obvious */}
+      <mesh position={[0.08, GATE_H / 2, 0]} castShadow>
+        <boxGeometry args={[0.14, GATE_H, 0.14]} />
         <meshToonMaterial color={WOOD_DARK} />
         <Outlines color={COLORS.outline} thickness={1} />
       </mesh>
-      <mesh position={[GATE_WIDTH - 0.08, POST_H / 2, 0]} castShadow>
-        <boxGeometry args={[0.14, POST_H, 0.14]} />
+      <mesh position={[GATE_WIDTH - 0.08, GATE_H / 2, 0]} castShadow>
+        <boxGeometry args={[0.14, GATE_H, 0.14]} />
         <meshToonMaterial color={WOOD_DARK} />
         <Outlines color={COLORS.outline} thickness={1} />
       </mesh>
-      {RAIL_YS.map((y, i) => (
+      {/* Top cap so the extra height reads clearly */}
+      <mesh position={[GATE_WIDTH / 2, GATE_H + 0.04, 0]} castShadow>
+        <boxGeometry args={[GATE_WIDTH + 0.08, 0.1, 0.16]} />
+        <meshToonMaterial color={WOOD_DARK} />
+        <Outlines color={COLORS.outline} thickness={0.8} />
+      </mesh>
+      {GATE_RAIL_YS.map((y, i) => (
         <mesh key={i} position={[GATE_WIDTH / 2, y, 0]} castShadow>
           <boxGeometry args={[GATE_WIDTH - 0.1, 0.1, 0.1]} />
           <meshToonMaterial color={WOOD} />
@@ -151,7 +160,7 @@ function GateLeaf({ gateState }) {
       ))}
       {/* Diagonal brace */}
       <mesh
-        position={[GATE_WIDTH / 2, 0.65, 0]}
+        position={[GATE_WIDTH / 2, GATE_H * 0.52, 0]}
         rotation={[0, 0, -0.45]}
         castShadow
       >
@@ -193,11 +202,19 @@ export function Fence({ gateState }) {
     [g1, z1],
   ]);
 
+  // Hinge / latch posts next to the gate use the taller gate height
+  const gatePostKeys = new Set([
+    `${g0.toFixed(2)},${z1.toFixed(2)}`,
+    `${g1.toFixed(2)},${z1.toFixed(2)}`,
+  ]);
+
   return (
     <group>
-      {[...postSet.values()].map(([x, z], i) => (
-        <Post key={i} position={[x, POST_H / 2, z]} />
-      ))}
+      {[...postSet.entries()].map(([key, [x, z]], i) => {
+        const isGatePost = gatePostKeys.has(key);
+        const h = isGatePost ? GATE_H : POST_H;
+        return <Post key={i} position={[x, h / 2, z]} height={h} />;
+      })}
 
       {/* North */}
       <RailRun x0={x0} z0={z0} x1={x1} z1={z0} />

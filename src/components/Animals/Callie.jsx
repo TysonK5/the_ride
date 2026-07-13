@@ -14,6 +14,10 @@ import {
   updateCompanionMeal,
 } from "./PetBowls";
 import {
+  petPushAccess,
+  tickPetAccessCooldowns,
+} from "../../systems/petNav";
+import {
   CompanionWings,
   WING_RETRACT_DELAY,
   FLY_FOLLOW_SPEED,
@@ -74,6 +78,8 @@ export function Callie({
     walkPhase: 0,
     wingsOut: false,
     wingTimer: 0,
+    prevX: -3.5,
+    prevZ: 9,
   });
 
   useFrame((_, delta) => {
@@ -83,6 +89,8 @@ export function Callie({
 
     const st = stateRef.current;
     const feed = feedRef.current;
+    const prevX = st.prevX ?? st.pos.x;
+    const prevZ = st.prevZ ?? st.pos.z;
     const px = track.position.x;
     const py = track.position.y ?? 0;
     const pz = track.position.z;
@@ -103,10 +111,17 @@ export function Callie({
     }
     wingsActiveRef.current = st.wingsOut;
 
+    // Meal trips: open barn doors / pen & cabin gates, path to bowls, return to player
     const onMeal =
       !playerFlying &&
       st.pos.y < 0.5 &&
-      updateCompanionMeal(st, feed, delta, 6.2);
+      updateCompanionMeal(st, feed, delta, 6.2, {
+        playerX: px,
+        playerZ: pz,
+        barnDoorState,
+        gateState,
+        cabinState,
+      });
 
     if (playerFlying || st.pos.y > 0.15) {
       st.mode = "fly";
@@ -215,6 +230,23 @@ export function Callie({
       st.pos.x = _next.x;
       st.pos.z = _next.z;
     }
+
+    // Push every known door/gate open or closed while following (meal path does this too)
+    if (st.pos.y < 0.25 && !playerFlying && !onMeal) {
+      tickPetAccessCooldowns(delta, barnDoorState, cabinState);
+      petPushAccess(
+        st.pos.x,
+        st.pos.z,
+        prevX,
+        prevZ,
+        barnDoorState,
+        gateState,
+        cabinState
+      );
+    }
+    st.prevX = st.pos.x;
+    st.prevZ = st.pos.z;
+
     setAnimalBody("callie", st.pos.x, st.pos.z, DOG_RADIUS);
 
     g.position.set(st.pos.x, st.pos.y, st.pos.z);

@@ -9,7 +9,12 @@ import {
   DRINK_DURATION,
   callNearestHorse,
 } from "../Horse/Horse";
-import { resolveCollisions, isNearShore } from "../../systems/colliders";
+import {
+  resolveCollisions,
+  isNearShore,
+  applyGroundHeight,
+  getGroundHeight,
+} from "../../systems/colliders";
 import {
   getFenceColliders,
   distToGate,
@@ -23,6 +28,7 @@ import {
   distToBarnBackDoor,
   BARN_DOOR_RANGE,
   distToCabinDoor,
+  distToCabinBackDoor,
   CABIN_DOOR_RANGE,
   tryPushCabinYardGates,
 } from "../Town/Buildings";
@@ -53,11 +59,17 @@ import {
   FishingPole,
   FishingWorldFX,
   applyFishingPose,
+  applySeatedFishingLegs,
   TARGET_SPEED,
   CAST_DURATION,
   REEL_DURATION,
   CATCH_SHOW,
 } from "./Fishing";
+import {
+  DOCK,
+  canSitAtDockChair,
+  distToDockChair,
+} from "../Environment/Dock";
 import {
   updateFootsteps,
   updateHoofsteps,
@@ -75,16 +87,53 @@ import {
   sfxFishBite,
   sfxFishReel,
   sfxFishCatch,
+  sfxButterflyCatch,
 } from "../../systems/audio";
 import { PLAY_HALF } from "../../systems/map";
+import {
+  RIDER_SEAT_HEIGHT,
+  STIRRUP_FOOT,
+} from "../Horse/Horse";
+import {
+  findNearestFurniture,
+  beginMoveFurniture,
+  placeFurniture,
+  cancelMoveFurniture,
+} from "../../systems/furniture";
+import {
+  findNearestButterfly,
+  catchButterfly,
+  releaseButterfly,
+  ButterflyNet,
+  BUTTERFLY_CATCH_RANGE,
+} from "../Animals/Butterfly";
 
 const MOVE_SPEED = 8;
 const SPRINT_MULT = 2;
 const CAMERA_DISTANCE = 6;
 const RIDE_CAMERA_DISTANCE = 8;
-/** Lift so hips sit deep on the western saddle seat (~1.60) */
-/** Match lowered horse saddle seat (~1.50 world) */
-const SEAT_HEIGHT = 0.7;
+/** Player root Y while mounted — hips rest on western saddle seat */
+const SEAT_HEIGHT = RIDER_SEAT_HEIGHT;
+
+/** Hip socket on the body (player-local) — legs stay attached here */
+const HIP_ATTACH_L = { x: -0.13, y: 0.74, z: 0.02 };
+const HIP_ATTACH_R = { x: 0.13, y: 0.74, z: 0.02 };
+/** Thigh length: hip origin → knee joint (matches mesh knee at y=-0.36) */
+const THIGH_LEN = 0.36;
+/** Shin length: knee → boot sole (knee at 0, shin, boot at ~-0.38) */
+const SHIN_LEN = 0.4;
+
+const _ikHip = new THREE.Vector3();
+const _ikFoot = new THREE.Vector3();
+const _ikDir = new THREE.Vector3();
+const _ikMid = new THREE.Vector3();
+const _ikAxis = new THREE.Vector3();
+const _ikKnee = new THREE.Vector3();
+const _ikPole = new THREE.Vector3();
+const _ikDown = new THREE.Vector3(0, -1, 0);
+const _ikQ = new THREE.Quaternion();
+const _ikQInv = new THREE.Quaternion();
+const _ikShin = new THREE.Vector3();
 const WALK_ANIM_SPEED = 10;
 const RUN_ANIM_SPEED = 18;
 const PLAYER_RADIUS = 0.45;
@@ -107,8 +156,12 @@ const MOUNT_ANIM_DURATION = 1.85;
 const PICK_ANIM_DURATION = 0.9;
 /** Kneel-plant-stand for planting a flower (seconds) */
 const PLANT_ANIM_DURATION = 1.05;
+/** Net swing to catch a butterfly (seconds) */
+const NET_CATCH_DURATION = 0.75;
 /** Progress at which the flower is actually picked / planted */
 const FLOWER_ACTION_AT = 0.42;
+/** Progress at which the butterfly is netted */
+const NET_CATCH_AT = 0.38;
 
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -125,7 +178,7 @@ function horseLocalToWorld(hx, hy, hz, yaw, lx, ly, lz, out) {
   const c = Math.cos(yaw);
   const s = Math.sin(yaw);
   out.x = hx + lx * c + lz * s;
-  out.y = ly;
+  out.y = hy + ly;
   out.z = hz - lx * s + lz * c;
   return out;
 }
@@ -150,6 +203,84 @@ function setLegArticulated(hipRef, kneeRef, hipPos, hipRot, kneeBendX) {
   }
 }
 
+/**
+ * Two-bone IK: hip stays on the pelvis, boot sole aims at the stirrup iron.
+ * Rest pose: thigh & shin along local −Y from each joint.
+ */
+function setLegIK(hipRef, kneeRef, hipPos, footX, footY, footZ, isLeft) {
+  if (!hipRef?.current || !kneeRef?.current) return;
+
+  hipRef.current.position.set(hipPos.x, hipPos.y, hipPos.z);
+  _ikHip.set(hipPos.x, hipPos.y, hipPos.z);
+  _ikFoot.set(footX, footY, footZ);
+
+  _ikDir.subVectors(_ikFoot, _ikHip);
+  let dist = _ikDir.length();
+  const maxReach = THIGH_LEN + SHIN_LEN - 0.02;
+  const minReach = 0.12;
+  if (dist < 1e-5) {
+    _ikDir.set(isLeft ? -0.25 : 0.25, -1, 0.08).normalize();
+    dist = minReach;
+    _ikFoot.copy(_ikHip).addScaledVector(_ikDir, dist);
+  } else if (dist > maxReach) {
+    _ikDir.multiplyScalar(1 / dist);
+    dist = maxReach;
+    _ikFoot.copy(_ikHip).addScaledVector(_ikDir, dist);
+  } else if (dist < minReach) {
+    _ikDir.multiplyScalar(1 / dist);
+    dist = minReach;
+    _ikFoot.copy(_ikHip).addScaledVector(_ikDir, dist);
+  } else {
+    _ikDir.multiplyScalar(1 / dist);
+  }
+
+  // Knee pole: outward + slightly forward (wraps outside the barrel)
+  _ikPole.set(isLeft ? -0.6 : 0.6, 0.05, 0.85);
+
+  const a =
+    (THIGH_LEN * THIGH_LEN - SHIN_LEN * SHIN_LEN + dist * dist) / (2 * dist);
+  const h = Math.sqrt(Math.max(0.0001, THIGH_LEN * THIGH_LEN - a * a));
+  _ikMid.copy(_ikHip).addScaledVector(_ikDir, a);
+  _ikAxis.crossVectors(_ikDir, _ikPole);
+  if (_ikAxis.lengthSq() < 1e-8) {
+    _ikAxis.set(1, 0, 0);
+  } else {
+    _ikAxis.normalize();
+  }
+  _ikKnee.copy(_ikMid).addScaledVector(_ikAxis, h);
+
+  // Hip: rest −Y → hip→knee
+  _ikDir.subVectors(_ikKnee, _ikHip).normalize();
+  _ikQ.setFromUnitVectors(_ikDown, _ikDir);
+  hipRef.current.quaternion.copy(_ikQ);
+
+  // Knee: rest −Y → knee→foot, expressed in hip local space
+  _ikQInv.copy(_ikQ).invert();
+  // foot in hip local
+  _ikShin.copy(_ikFoot).sub(_ikHip).applyQuaternion(_ikQInv);
+  // knee joint fixed at (0, -THIGH_LEN, 0) in hip local
+  _ikShin.y += THIGH_LEN; // shinDir = footLocal - kneeLocal
+  if (_ikShin.lengthSq() < 1e-8) {
+    _ikShin.set(0, -1, 0);
+  } else {
+    _ikShin.normalize();
+  }
+  const qKnee = new THREE.Quaternion().setFromUnitVectors(_ikDown, _ikShin);
+  kneeRef.current.quaternion.copy(qKnee);
+}
+
+/** Stirrup iron in player-local space (player root at seat on horse). */
+function stirrupPlayerLocal(isLeft) {
+  return {
+    x: isLeft ? -STIRRUP_FOOT.x : STIRRUP_FOOT.x,
+    y: STIRRUP_FOOT.y - SEAT_HEIGHT,
+    z: STIRRUP_FOOT.z,
+  };
+}
+
+/**
+ * Seated rider: hips glued to the pelvis sockets; boots IK'd onto stirrups.
+ */
 function applySeatedPose(
   bodyRef,
   leftArmRef,
@@ -161,15 +292,12 @@ function applySeatedPose(
   hatRef,
   carrying = false
 ) {
-  // Seat on saddle; legs hang DOWN the outside of the horse (visible boots).
-  // Hips wide of barrel; small forward tilt; soft knee so feet drop into stirrups.
   if (bodyRef.current) {
     bodyRef.current.position.y = 0.94;
-    bodyRef.current.rotation.x = 0.04;
+    bodyRef.current.rotation.x = 0.05;
     bodyRef.current.rotation.z = 0;
   }
   if (leftArmRef.current) {
-    // Keep flower in left hand while riding
     leftArmRef.current.rotation.set(
       carrying ? -0.75 : -0.55,
       carrying ? 0.28 : 0.12,
@@ -179,22 +307,28 @@ function applySeatedPose(
   if (rightArmRef.current) {
     rightArmRef.current.rotation.set(-0.75, -0.08, -0.18);
   }
-  // ±0.55 clears barrel (~0.22–0.28r). z-rot opens hip; low x-rot = hang down not through belly.
-  // Soft knee keeps shin/boot outside and visible below the barrel.
-  setLegArticulated(
+
+  const footL = stirrupPlayerLocal(true);
+  const footR = stirrupPlayerLocal(false);
+  setLegIK(
     leftLegRef,
     leftKneeRef,
-    [-0.55, 0.78, 0.1],
-    [0.18, 0.15, 0.85],
-    0.55
+    HIP_ATTACH_L,
+    footL.x,
+    footL.y,
+    footL.z,
+    true
   );
-  setLegArticulated(
+  setLegIK(
     rightLegRef,
     rightKneeRef,
-    [0.55, 0.78, 0.1],
-    [0.18, -0.15, -0.85],
-    0.55
+    HIP_ATTACH_R,
+    footR.x,
+    footR.y,
+    footR.z,
+    false
   );
+
   if (hatRef.current) hatRef.current.rotation.z = 0;
 }
 
@@ -344,10 +478,11 @@ function applyMountAnimation(
   if (!g || !rideState) return;
 
   const hx = rideState.position.x;
+  const hy = rideState.position.y ?? 0;
   const hz = rideState.position.z;
   const yaw = rideState.yaw;
 
-  // Key poses in horse-local space
+  // Key poses in horse-local space (Y is relative to horse feet / ground)
   // side -1 = horse left (traditional mount), +1 = horse right
   const beside = { x: side * 1.35, y: 0, z: 0.05 };
   const stirrup = { x: side * 0.5, y: 0.55, z: 0.08 };
@@ -385,7 +520,7 @@ function applyMountAnimation(
     lz = lerp(highStirrup.z, seat.z, u);
   }
 
-  horseLocalToWorld(hx, 0, hz, yaw, lx, ly, lz, _animPos);
+  horseLocalToWorld(hx, hy, hz, yaw, lx, ly, lz, _animPos);
   g.position.copy(_animPos);
   g.rotation.y = yaw;
 
@@ -452,41 +587,58 @@ function applyMountAnimation(
       );
     } else if (phase === "swing") {
       const u = smoothstep((t - 0.42) / 0.3);
-      setLegArticulated(
+      const footNear = stirrupPlayerLocal(nearIsLeft);
+      const footFar = stirrupPlayerLocal(!nearIsLeft);
+      const hipNear = nearIsLeft ? HIP_ATTACH_L : HIP_ATTACH_R;
+      const hipFar = nearIsLeft ? HIP_ATTACH_R : HIP_ATTACH_L;
+      // Near leg plants on its stirrup early
+      setLegIK(
         nearHip,
         nearKnee,
-        [s * 0.5, 0.76, 0.1],
-        [0.2, s * 0.12, s * 0.75],
-        0.5
+        hipNear,
+        footNear.x,
+        footNear.y,
+        footNear.z,
+        nearIsLeft
       );
-      setLegArticulated(
-        farHip,
-        farKnee,
-        [lerp(-s * 0.15, -s * 0.55, u), lerp(0.9, 0.78, u), lerp(0.2, 0.1, u)],
-        [lerp(1.0, 0.18, u), lerp(0, -s * 0.15, u), lerp(-s * 0.2, -s * 0.85, u)],
-        lerp(0.3, 0.55, u)
-      );
+      // Far leg swings high over the seat, then IK to far stirrup
+      if (u < 0.55) {
+        setLegArticulated(
+          farHip,
+          farKnee,
+          [s * 0.08, lerp(0.9, 1.05, u / 0.55), lerp(0.15, 0.35, u / 0.55)],
+          [lerp(0.5, 1.2, u / 0.55), 0, -s * 0.15],
+          0.25
+        );
+      } else {
+        const v = (u - 0.55) / 0.45;
+        setLegIK(
+          farHip,
+          farKnee,
+          hipFar,
+          lerp(s * 0.1, footFar.x, v),
+          lerp(0.9, footFar.y, v),
+          lerp(0.3, footFar.z, v),
+          !nearIsLeft
+        );
+      }
     } else {
-      // Settle: legs hang down both sides, feet visible
-      const u = smoothstep((t - 0.72) / 0.28);
-      setLegArticulated(
-        nearHip,
-        nearKnee,
-        [lerp(s * 0.5, s * 0.55, u), 0.78, 0.1],
-        [0.18, s * 0.15, s * 0.85],
-        0.55
-      );
-      setLegArticulated(
-        farHip,
-        farKnee,
-        [-s * 0.55, 0.78, 0.1],
-        [0.18, -s * 0.15, -s * 0.85],
-        0.55
+      // Settle — full seated IK (hips on pelvis, boots in irons)
+      applySeatedPose(
+        bodyRef,
+        leftArmRef,
+        rightArmRef,
+        leftLegRef,
+        rightLegRef,
+        leftKneeRef,
+        rightKneeRef,
+        hatRef,
+        false
       );
     }
   }
 
-  if (hatRef.current) hatRef.current.rotation.z = 0;
+  if (hatRef.current && phase !== "settle") hatRef.current.rotation.z = 0;
 }
 
 function updateCamera(
@@ -569,7 +721,9 @@ export const Player = forwardRef(function Player(
     gateState,
     barnDoorState,
     cabinState,
+    furnitureState = null,
     flowerState,
+    butterflyState = null,
     playerTrack,
     onFlowerChange,
     onRideHint,
@@ -599,6 +753,20 @@ export const Player = forwardRef(function Player(
   const [heldTypeId, setHeldTypeId] = useState(
     () => flowerState?.heldTypeId ?? null
   );
+  /**
+   * Net state:
+   * - showNet: net is visible on the right hand
+   * - heldButterfly: payload in the net until release (null when empty)
+   * - netAnim: short swing when first catching
+   */
+  const [showNet, setShowNet] = useState(false);
+  const [heldButterfly, setHeldButterfly] = useState(null);
+  const netAnimRef = useRef({
+    active: false,
+    t: 0,
+    didCatch: false,
+    butterflyId: null,
+  });
   /** Show fishing rod in the right hand */
   const [fishingPoleOut, setFishingPoleOut] = useState(false);
   const fishingRef = useRef(createFishingState());
@@ -689,6 +857,7 @@ export const Player = forwardRef(function Player(
     const busy =
       anim.active ||
       flowerAnim.active ||
+      netAnimRef.current.active ||
       fishing.active ||
       mounts.some((m) => m.busy);
 
@@ -721,6 +890,9 @@ export const Player = forwardRef(function Player(
     const cabinDoorDist = distToCabinDoor(px, pz);
     const nearCabinDoor =
       !mounted && !busy && cabinDoorDist <= CABIN_DOOR_RANGE;
+    const cabinBackDoorDist = distToCabinBackDoor(px, pz);
+    const nearCabinBackDoor =
+      !mounted && !busy && cabinBackDoorDist <= CABIN_DOOR_RANGE;
     // Nearest free mount (horse or unicorn)
     let nearMount = null;
     let nearMountDist = Infinity;
@@ -750,10 +922,33 @@ export const Player = forwardRef(function Player(
       !mounted && !busy && flowerState
         ? findNearestFlower(flowerState, px, pz, FLOWER_PICK_RANGE)
         : null;
+    const carryingButterfly =
+      !!heldButterfly || !!butterflyState?.held;
+    const nearButterflyHit =
+      !mounted &&
+      !busy &&
+      !holdingFlower &&
+      !carryingButterfly &&
+      butterflyState
+        ? findNearestButterfly(
+            butterflyState,
+            px,
+            groupRef.current.position.y,
+            pz,
+            BUTTERFLY_CATCH_RANGE
+          )
+        : null;
     const canPlantHere =
       holdingFlower && !mounted && !busy && !isBlockedPlantSpot(px, pz);
     const nearFishing =
       canFishHere(px, pz, mounted, holdingFlower, busy && !fishing.active);
+    const nearDockChair = canSitAtDockChair(
+      px,
+      pz,
+      mounted,
+      holdingFlower,
+      busy && !fishing.active
+    );
 
     const s = settingsRef.current;
     const bindings = s.bindings;
@@ -824,7 +1019,9 @@ export const Player = forwardRef(function Player(
         fishing.phaseT = 0;
         fishing.castFromX = groupRef.current.position.x;
         fishing.castFromZ = groupRef.current.position.z;
-        fishing.castFromY = 1.6;
+        fishing.castFromY = fishing.seated
+          ? groupRef.current.position.y + 1.35
+          : 1.6;
         fishing.bobberX = fishing.castFromX;
         fishing.bobberZ = fishing.castFromZ;
         fishing.bobberY = fishing.castFromY;
@@ -856,8 +1053,8 @@ export const Player = forwardRef(function Player(
     if (mountDown && !mountPressedRef.current && !busy && !drinking && !fishing.active) {
       if (mounted && activeRide) {
         // Land unicorn before dismount
-        activeRide.position.y = 0;
         activeRide.airborne = false;
+        applyGroundHeight(activeRide.position);
         activeRide.justDrank = false;
         activeRide.moving = false;
         activeRide.sprinting = false;
@@ -919,8 +1116,76 @@ export const Player = forwardRef(function Player(
       }
     }
 
+    // --- Furniture move: place if carrying, or pick up nearest cabin piece ---
+    const nearFurniture =
+      !mounted &&
+      !busy &&
+      furnitureState &&
+      !furnitureState.movingId
+        ? findNearestFurniture(furnitureState, px, pz)
+        : null;
+    let furnitureInteracted = false;
+    if (
+      interactDown &&
+      !interactPressedRef.current &&
+      !busy &&
+      !drinking &&
+      !mounted &&
+      furnitureState
+    ) {
+      if (furnitureState.movingId) {
+        placeFurniture(furnitureState);
+        furnitureInteracted = true;
+      } else if (nearFurniture && !holdingFlower && !nearFlowerHit) {
+        beginMoveFurniture(furnitureState, nearFurniture.item.id);
+        furnitureInteracted = true;
+      }
+    }
+    // Cancel furniture move with sprint press edge while carrying
+    if (
+      furnitureState?.movingId &&
+      sprintDown &&
+      !sprintPressedRef.current &&
+      !fishing.active
+    ) {
+      cancelMoveFurniture(furnitureState);
+    }
+
+    // --- Release butterfly from net (interact while carrying) ---
+    let butterflyInteracted = false;
+    if (
+      interactDown &&
+      !interactPressedRef.current &&
+      !busy &&
+      !drinking &&
+      !mounted &&
+      carryingButterfly &&
+      !furnitureInteracted
+    ) {
+      releaseButterfly(
+        butterflyState,
+        px,
+        pz,
+        groupRef.current.rotation.y
+      );
+      setHeldButterfly(null);
+      setShowNet(false);
+      if (rightArmRef.current) rightArmRef.current.rotation.set(0, 0, 0);
+      butterflyInteracted = true;
+      sfxButterflyCatch();
+    }
+
     // --- Interact (doors, flowers, fishing, horse drink — not mount) ---
-    if (interactDown && !interactPressedRef.current && !busy && !drinking) {
+    if (
+      interactDown &&
+      !interactPressedRef.current &&
+      !busy &&
+      !drinking &&
+      !furnitureInteracted &&
+      !butterflyInteracted &&
+      !carryingButterfly &&
+      !furnitureState?.movingId
+    ) {
       if (mounted && activeRide) {
         // At shore + stopped + haven't just drunk → drink (dismount is R)
         if (atShore && !activeRide.justDrank) {
@@ -973,6 +1238,27 @@ export const Player = forwardRef(function Player(
           });
         }
 
+        if (nearButterflyHit && butterflyState) {
+          acts.push({
+            d: nearButterflyHit.dist,
+            run: () => {
+              const b = nearButterflyHit.butterfly;
+              groupRef.current.rotation.y = Math.atan2(
+                b.pos.x - px,
+                b.pos.z - pz
+              );
+              const netAnim = netAnimRef.current;
+              netAnim.active = true;
+              netAnim.t = 0;
+              netAnim.didCatch = false;
+              netAnim.butterflyId = b.id;
+              setShowNet(true);
+              walkCycleRef.current = 0;
+              sfxButterflyCatch();
+            },
+          });
+        }
+
         if (nearBarnDoors && barnDoorState) {
           acts.push({
             d: barnDoorDist,
@@ -1000,6 +1286,15 @@ export const Player = forwardRef(function Player(
             },
           });
         }
+        if (nearCabinBackDoor && cabinState) {
+          acts.push({
+            d: cabinBackDoorDist,
+            run: () => {
+              cabinState.backDoorOpen = !cabinState.backDoorOpen;
+              sfxDoorWood();
+            },
+          });
+        }
         if (nearGate && gateState) {
           acts.push({
             d: gateDist,
@@ -1009,12 +1304,44 @@ export const Player = forwardRef(function Player(
             },
           });
         }
-        if (nearFishing) {
+        if (nearDockChair) {
+          acts.push({
+            d: distToDockChair(px, pz),
+            run: () => {
+              // Snap into the dock chair and start fishing seated, facing water
+              const sx = DOCK.sit.x;
+              const sz = DOCK.sit.z;
+              const t = defaultTargetFromShore(sx, sz);
+              // Same facing convention as walking: atan2(dx, dz) → mesh +Z toward target
+              const faceYaw = Math.atan2(t.x - sx, t.z - sz);
+              groupRef.current.position.set(sx, DOCK.deckY, sz);
+              groupRef.current.rotation.y = faceYaw;
+              yawRef.current = faceYaw;
+              fishing.active = true;
+              fishing.seated = true;
+              fishing.phase = "aim";
+              fishing.phaseT = 0;
+              fishing.targetX = t.x;
+              fishing.targetZ = t.z;
+              fishing.bobberX = t.x;
+              fishing.bobberZ = t.z;
+              fishing.bobberY = 0.2;
+              fishing.fish = null;
+              fishing.resultText = "";
+              fishing.waitDuration = 0;
+              fishing.castFromY = DOCK.deckY + 1.35;
+              walkCycleRef.current = 0;
+              setFishingPoleOut(true);
+              sfxFishStart();
+            },
+          });
+        } else if (nearFishing) {
           acts.push({
             d: 0.4,
             run: () => {
               const t = defaultTargetFromShore(px, pz);
               fishing.active = true;
+              fishing.seated = false;
               fishing.phase = "aim";
               fishing.phaseT = 0;
               fishing.targetX = t.x;
@@ -1061,15 +1388,31 @@ export const Player = forwardRef(function Player(
       if (anim.active) {
         hint =
           anim.mode === "mount" ? "Mounting…" : "Dismounting…";
+      } else if (furnitureState?.movingId) {
+        const piece = furnitureState.items.find(
+          (f) => f.id === furnitureState.movingId
+        );
+        const name = piece?.name || "item";
+        hint = `Moving ${name} · ${interactKey} place · ${sprintKey} cancel`;
+      } else if (netAnimRef.current.active) {
+        hint = "Catching butterfly…";
+      } else if (carryingButterfly) {
+        const name = heldButterfly?.name || butterflyState?.held?.name || "butterfly";
+        hint = `Carrying ${name} · ${interactKey} to release`;
       } else if (flowerAnim.active) {
         hint = flowerAnim.mode === "pick" ? "Picking…" : "Planting…";
       } else if (fishing.active) {
         if (fishing.phase === "aim") {
-          hint = `${interactKey} cast · move aim · ${sprintKey} cancel`;
+          hint = fishing.seated
+            ? `${interactKey} cast · move aim · ${sprintKey} stand up`
+            : `${interactKey} cast · move aim · ${sprintKey} cancel`;
         } else if (fishing.phase === "cast") {
           hint = "Casting…";
         } else if (fishing.phase === "wait") {
-          hint = "Waiting for a bite… · " + sprintKey + " cancel";
+          hint =
+            "Waiting for a bite… · " +
+            sprintKey +
+            (fishing.seated ? " stand up" : " cancel");
         } else if (fishing.phase === "bite") {
           hint = `${interactKey} to reel in!`;
         } else if (fishing.phase === "reel") {
@@ -1111,7 +1454,18 @@ export const Player = forwardRef(function Player(
             text: `${interactKey} to pick ${name}`,
           });
         }
-        if (nearFishing) {
+        if (nearButterflyHit) {
+          options.push({
+            d: nearButterflyHit.dist,
+            text: `${interactKey} to catch butterfly`,
+          });
+        }
+        if (nearDockChair) {
+          options.push({
+            d: distToDockChair(px, pz),
+            text: `${interactKey} to sit & fish`,
+          });
+        } else if (nearFishing) {
           options.push({
             d: 0.4,
             text: `${interactKey} to fish`,
@@ -1133,12 +1487,26 @@ export const Player = forwardRef(function Player(
               : `${interactKey} to open sliding door`,
           });
         }
+        if (nearFurniture) {
+          options.push({
+            d: nearFurniture.dist,
+            text: `${interactKey} to move ${nearFurniture.item.name}`,
+          });
+        }
         if (nearCabinDoor) {
           options.push({
             d: cabinDoorDist,
             text: cabinState?.doorOpen
               ? `${interactKey} to close cabin door`
               : `${interactKey} to open cabin door`,
+          });
+        }
+        if (nearCabinBackDoor) {
+          options.push({
+            d: cabinBackDoorDist,
+            text: cabinState?.backDoorOpen
+              ? `${interactKey} to close patio door`
+              : `${interactKey} to open patio door`,
           });
         }
         if (nearGate) {
@@ -1224,10 +1592,10 @@ export const Player = forwardRef(function Player(
         } else {
           rs.mounted = false;
           rs.busy = false;
-          // Land beside mount
+          // Land beside mount (on local ground height)
           horseLocalToWorld(
             rs.position.x,
-            0,
+            rs.position.y ?? 0,
             rs.position.z,
             rs.yaw,
             anim.side * 1.45,
@@ -1236,7 +1604,6 @@ export const Player = forwardRef(function Player(
             _animPos
           );
           groupRef.current.position.copy(_animPos);
-          groupRef.current.position.y = 0;
           resolveCollisions(
             groupRef.current.position,
             PLAYER_RADIUS,
@@ -1252,6 +1619,7 @@ export const Player = forwardRef(function Player(
             ],
             cabinState
           );
+          applyGroundHeight(groupRef.current.position);
           resetStandingPose(
             bodyRef,
             leftArmRef,
@@ -1275,6 +1643,62 @@ export const Player = forwardRef(function Player(
         playerTrack.position.copy(groupRef.current.position);
         playerTrack.yaw = groupRef.current.rotation.y;
         playerTrack.moving = true;
+        playerTrack.mounted = false;
+      }
+      updateCamera(
+        camera,
+        scene,
+        groupRef.current,
+        yawRef.current,
+        pitchRef.current,
+        false,
+        delta,
+        camDistSmoothRef
+      );
+      return;
+    }
+
+    // --- Butterfly net catch swing ---
+    const netAnim = netAnimRef.current;
+    if (netAnim.active) {
+      netAnim.t = Math.min(1, netAnim.t + delta / NET_CATCH_DURATION);
+      // Swing right arm with net
+      if (rightArmRef.current) {
+        const swing = Math.sin(netAnim.t * Math.PI);
+        rightArmRef.current.rotation.set(
+          -0.4 - swing * 1.4,
+          -0.35 * swing,
+          -0.5 - swing * 0.6
+        );
+      }
+      if (bodyRef.current) {
+        bodyRef.current.rotation.x = 0.08 * Math.sin(netAnim.t * Math.PI);
+      }
+      // Commit catch mid-swing — butterfly stays in net until released
+      if (!netAnim.didCatch && netAnim.t >= NET_CATCH_AT && butterflyState) {
+        netAnim.didCatch = true;
+        const held = catchButterfly(butterflyState, netAnim.butterflyId);
+        if (held) {
+          setHeldButterfly(held);
+          setShowNet(true);
+        }
+        sfxButterflyCatch();
+      }
+      if (netAnim.t >= 1) {
+        netAnim.active = false;
+        netAnim.t = 0;
+        netAnim.butterflyId = null;
+        // Keep net out if we have a butterfly; otherwise put it away
+        if (!butterflyState?.held && !heldButterfly) {
+          setShowNet(false);
+          if (rightArmRef.current) rightArmRef.current.rotation.set(0, 0, 0);
+        }
+        if (bodyRef.current) bodyRef.current.rotation.x = 0;
+      }
+      if (playerTrack) {
+        playerTrack.position.copy(groupRef.current.position);
+        playerTrack.yaw = groupRef.current.rotation.y;
+        playerTrack.moving = false;
         playerTrack.mounted = false;
       }
       updateCamera(
@@ -1483,23 +1907,37 @@ export const Player = forwardRef(function Player(
         bodyRef,
         leftArmRef,
         rightArmRef,
-        fishing.phase
+        fishing.phase,
+        !!fishing.seated
       );
-      // Legs stay planted
-      setLegArticulated(
-        leftLegRef,
-        leftKneeRef,
-        [-0.11, 0.77, 0],
-        [0, 0, 0],
-        0
-      );
-      setLegArticulated(
-        rightLegRef,
-        rightKneeRef,
-        [0.11, 0.77, 0],
-        [0, 0, 0],
-        0
-      );
+      if (fishing.seated) {
+        // Keep seated on the dock chair
+        groupRef.current.position.x = DOCK.sit.x;
+        groupRef.current.position.z = DOCK.sit.z;
+        groupRef.current.position.y = DOCK.deckY;
+        applySeatedFishingLegs(
+          leftLegRef,
+          leftKneeRef,
+          rightLegRef,
+          rightKneeRef,
+          setLegArticulated
+        );
+      } else {
+        setLegArticulated(
+          leftLegRef,
+          leftKneeRef,
+          [-0.11, 0.77, 0],
+          [0, 0, 0],
+          0
+        );
+        setLegArticulated(
+          rightLegRef,
+          rightKneeRef,
+          [0.11, 0.77, 0],
+          [0, 0, 0],
+          0
+        );
+      }
 
       if (playerTrack) {
         playerTrack.position.copy(groupRef.current.position);
@@ -1559,12 +1997,13 @@ export const Player = forwardRef(function Player(
 
     if (mounted && activeRide) {
       const isUnicorn = activeRide.name === "unicorn";
+      const prevRideY = activeRide.position.y;
       // Can't ride away while drinking
       if (activeRide.drinking) {
         activeRide.moving = false;
         activeRide.sprinting = false;
-        activeRide.position.y = 0;
         activeRide.airborne = false;
+        applyGroundHeight(activeRide.position, prevRideY);
       } else {
         activeRide.sprinting = sprinting && isMoving;
 
@@ -1573,22 +2012,25 @@ export const Player = forwardRef(function Player(
           const up = flyUpDown;
           const down = flyDownDown;
           const vertMult = sprinting ? 1.35 : 1;
+          const floorY = getGroundHeight(
+            activeRide.position.x,
+            activeRide.position.z
+          );
           if (up) {
             activeRide.position.y += FLY_UP_SPEED * vertMult * delta;
           } else if (down) {
             activeRide.position.y -= FLY_DOWN_SPEED * vertMult * delta;
-          } else if (activeRide.position.y > 0.05) {
+          } else if (activeRide.position.y > floorY + 0.05) {
             // Soft gravity when not holding fly keys
             activeRide.position.y -= FLY_GRAVITY * delta;
           }
           activeRide.position.y = THREE.MathUtils.clamp(
             activeRide.position.y,
-            0,
+            floorY,
             FLY_MAX_HEIGHT
           );
-          activeRide.airborne = activeRide.position.y > 0.15;
+          activeRide.airborne = activeRide.position.y > floorY + 0.15;
         } else {
-          activeRide.position.y = 0;
           activeRide.airborne = false;
         }
 
@@ -1627,15 +2069,15 @@ export const Player = forwardRef(function Player(
         -PLAY_HALF,
         PLAY_HALF
       );
-      // Ground collision only when not flying
+      // Stand on raised floors when not flying
       if (!activeRide.airborne) {
-        activeRide.position.y = 0;
         resolveCollisions(
           activeRide.position,
           HORSE_RADIUS,
           extras,
           cabinState
         );
+        applyGroundHeight(activeRide.position, prevRideY);
       }
 
       groupRef.current.position.set(
@@ -1658,6 +2100,7 @@ export const Player = forwardRef(function Player(
       );
       walkCycleRef.current = 0;
     } else {
+      const prevPlayerY = groupRef.current.position.y;
       if (isMoving) {
         _move.normalize().multiplyScalar(speed * delta);
 
@@ -1687,13 +2130,14 @@ export const Player = forwardRef(function Player(
         -PLAY_HALF,
         PLAY_HALF
       );
-      groupRef.current.position.y = 0;
       resolveCollisions(
         groupRef.current.position,
         PLAYER_RADIUS,
         extras,
         cabinState
       );
+      // Step onto barn / cabin / patio / garden floors (never walk under them)
+      applyGroundHeight(groupRef.current.position, prevPlayerY);
 
       // === Walk / run animation ===
       const swingAmp = sprinting ? 1.05 : 0.6;
@@ -1723,9 +2167,22 @@ export const Player = forwardRef(function Player(
         }
       }
       if (rightArmRef.current) {
-        rightArmRef.current.rotation.x = swingAmount * (sprinting ? 1.15 : 1);
-        rightArmRef.current.rotation.y = 0;
-        rightArmRef.current.rotation.z = -swingAmountZ * (sprinting ? 0.45 : 0.3);
+        if (carryingButterfly || (showNet && heldButterfly)) {
+          // Arm straight up — net held vertical above the head
+          rightArmRef.current.rotation.x = -2.95 + swingAmount * 0.03;
+          rightArmRef.current.rotation.y = 0.08;
+          rightArmRef.current.rotation.z = -0.22 + swingAmountZ * 0.04;
+        } else if (showNet) {
+          // Brief empty-net swing recovery
+          rightArmRef.current.rotation.x = -0.55 + swingAmount * 0.06;
+          rightArmRef.current.rotation.y = -0.12;
+          rightArmRef.current.rotation.z = -0.38;
+        } else {
+          rightArmRef.current.rotation.x = swingAmount * (sprinting ? 1.15 : 1);
+          rightArmRef.current.rotation.y = 0;
+          rightArmRef.current.rotation.z =
+            -swingAmountZ * (sprinting ? 0.45 : 0.3);
+        }
       }
       // Walk/run with hip swing + knee bend
       const hipSwing = swingAmount * (sprinting ? 1.15 : 0.9);
@@ -1924,6 +2381,12 @@ export const Player = forwardRef(function Player(
               <Outlines color={COLORS.outline} thickness={1} />
             </mesh>
             {fishingPoleOut && <FishingPole tipRef={fishingPoleTipRef} />}
+            {(showNet || heldButterfly || butterflyState?.held) && (
+              <ButterflyNet
+                scale={1.05}
+                held={heldButterfly || butterflyState?.held}
+              />
+            )}
           </group>
         </group>
       </group>

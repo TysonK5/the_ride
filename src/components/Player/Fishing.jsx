@@ -40,6 +40,8 @@ export function createFishingState() {
     fish: null,
     /** Message shown briefly after catch */
     resultText: "",
+    /** True when fishing from the dock chair (seated pose) */
+    seated: false,
   };
 }
 
@@ -366,31 +368,78 @@ function CatchFishMesh({ fishingRef }) {
 /**
  * Fishing body pose — right arm nearly vertical so the pole stands upright
  * (tip above the head), not laid out horizontal.
+ * When `seated`, pelvis rests ON the dock chair seat (not inside the mesh).
  */
-export function applyFishingPose(bodyRef, leftArmRef, rightArmRef, phase) {
+export function applyFishingPose(
+  bodyRef,
+  leftArmRef,
+  rightArmRef,
+  phase,
+  seated = false
+) {
   if (bodyRef?.current) {
-    bodyRef.current.position.y = 0.94;
-    bodyRef.current.rotation.x =
-      phase === "cast" || phase === "reel" ? 0.04 : 0.01;
+    // Standing torso ~0.94; seated torso sits above the chair seat (~0.47 deck-rel)
+    // so the capsule bottom clears the cushion instead of sinking through it.
+    bodyRef.current.position.y = seated ? 0.78 : 0.94;
+    bodyRef.current.rotation.x = seated
+      ? 0.06
+      : phase === "cast" || phase === "reel"
+        ? 0.04
+        : 0.01;
   }
-  // Left arm brace / idle
+  // Left arm brace / idle (slightly out so it clears armrests)
   if (leftArmRef?.current) {
-    leftArmRef.current.rotation.set(-0.15, 0.1, 0.2);
+    leftArmRef.current.rotation.set(
+      seated ? -0.28 : -0.15,
+      0.12,
+      seated ? 0.42 : 0.2
+    );
   }
   // Right arm straight up (hand above shoulder) → pole shaft vertical
   if (rightArmRef?.current) {
     if (phase === "cast") {
-      // Slight lean into the cast while staying mostly upright
-      rightArmRef.current.rotation.set(-2.55, -0.2, 0.05);
+      rightArmRef.current.rotation.set(
+        seated ? -2.4 : -2.55,
+        -0.18,
+        0.05
+      );
     } else if (phase === "reel") {
       rightArmRef.current.rotation.set(
-        -2.45 + Math.sin(performance.now() * 0.018) * 0.08,
-        -0.18,
+        (seated ? -2.3 : -2.45) + Math.sin(performance.now() * 0.018) * 0.08,
+        -0.16,
         0.02
       );
     } else {
-      // aim / wait / bite / catch — arm up, pole vertical
-      rightArmRef.current.rotation.set(-2.5, -0.15, 0.08);
+      rightArmRef.current.rotation.set(seated ? -2.4 : -2.5, -0.12, 0.08);
     }
   }
+}
+
+/**
+ * Seated leg pose for dock chair fishing.
+ * Hips sit on the seat cushion; thighs go forward (local +Z / toward water);
+ * shins fold so boots rest near the deck in front of the chair.
+ */
+export function applySeatedFishingLegs(
+  leftLegRef,
+  leftKneeRef,
+  rightLegRef,
+  rightKneeRef,
+  setLeg
+) {
+  // Hip Y ≈ seat top (0.47) + small sit padding; thighs forward, knees bent
+  setLeg(
+    leftLegRef,
+    leftKneeRef,
+    [-0.13, 0.58, 0.04],
+    [-1.02, 0.06, 0.05],
+    1.18
+  );
+  setLeg(
+    rightLegRef,
+    rightKneeRef,
+    [0.13, 0.58, 0.04],
+    [-1.02, -0.06, -0.05],
+    1.18
+  );
 }

@@ -14,6 +14,10 @@ import {
   updateCompanionMeal,
 } from "./PetBowls";
 import {
+  petPushAccess,
+  tickPetAccessCooldowns,
+} from "../../systems/petNav";
+import {
   CompanionWings,
   WING_RETRACT_DELAY,
   FLY_FOLLOW_SPEED,
@@ -77,6 +81,8 @@ export function Cat({
     walkPhase: 0,
     wingsOut: false,
     wingTimer: 0,
+    prevX: 4,
+    prevZ: 10,
   });
 
   useFrame((_, delta) => {
@@ -86,6 +92,8 @@ export function Cat({
 
     const st = stateRef.current;
     const feed = feedRef.current;
+    const prevX = st.prevX ?? st.pos.x;
+    const prevZ = st.prevZ ?? st.pos.z;
     const px = track.position.x;
     const py = track.position.y ?? 0;
     const pz = track.position.z;
@@ -107,11 +115,18 @@ export function Cat({
     }
     wingsActiveRef.current = st.wingsOut;
 
-    // Skip meals while airborne chase
+    // Skip meals while airborne chase. Meal trips open barn doors / gates
+    // and pathfind to bowls, then return to the player.
     const onMeal =
       !playerFlying &&
       st.pos.y < 0.5 &&
-      updateCompanionMeal(st, feed, delta, 5.8);
+      updateCompanionMeal(st, feed, delta, 5.8, {
+        playerX: px,
+        playerZ: pz,
+        barnDoorState,
+        gateState,
+        cabinState,
+      });
 
     if (playerFlying || st.pos.y > 0.15) {
       // --- Air follow (unicorn flight) ---
@@ -232,6 +247,23 @@ export function Cat({
       st.pos.x = _next.x;
       st.pos.z = _next.z;
     }
+
+    // Push every known door/gate open or closed while following (meal path does this too)
+    if (st.pos.y < 0.25 && !playerFlying && !onMeal) {
+      tickPetAccessCooldowns(delta, barnDoorState, cabinState);
+      petPushAccess(
+        st.pos.x,
+        st.pos.z,
+        prevX,
+        prevZ,
+        barnDoorState,
+        gateState,
+        cabinState
+      );
+    }
+    st.prevX = st.pos.x;
+    st.prevZ = st.pos.z;
+
     setAnimalBody("cat", st.pos.x, st.pos.z, CAT_RADIUS);
 
     g.position.set(st.pos.x, st.pos.y, st.pos.z);

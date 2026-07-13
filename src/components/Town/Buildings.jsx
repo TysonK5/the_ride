@@ -4,6 +4,7 @@ import { Outlines } from "@react-three/drei";
 import * as THREE from "three";
 import { COLORS } from "../../materials/colors";
 import { PetBowls } from "../Animals/PetBowls";
+import { updateMovingFurniture } from "../../systems/furniture";
 
 export const BARN_W = 18;
 export const BARN_D = 12;
@@ -15,14 +16,24 @@ export const DOOR_LEAF_H = 4.6;
 export const BARN_DOOR_RANGE = 4.5;
 export const BARN_DOOR_Z = BARN_D / 2; // front face
 export const BARN_BACK_Z = -BARN_D / 2; // back face
-/** How far each front leaf slides outward when open */
-export const FRONT_DOOR_SLIDE = DOOR_LEAF_W + 0.12;
+/**
+ * How far each front leaf slides sideways when open.
+ * Parks fully over the exterior side wall (past the door jamb).
+ */
+export const FRONT_DOOR_SLIDE = DOOR_LEAF_W + 0.55;
+/**
+ * How far in front of the wall face the sliding leaves sit so they stay
+ * visible on the outside of the barn when open (not buried in the wall).
+ */
+export const FRONT_DOOR_EXTERIOR = 0.42;
 /** Rear sliding door half-width (opening ~5.2) */
 export const BACK_DOOR_HALF = 2.6;
 export const BACK_DOOR_W = BACK_DOOR_HALF * 2;
 export const BACK_DOOR_H = 4.4;
 /** How far the rear slide door travels when open */
-export const BACK_DOOR_SLIDE = BACK_DOOR_W + 0.15;
+export const BACK_DOOR_SLIDE = BACK_DOOR_W + 0.45;
+/** Exterior offset for rear door (outside back wall face) */
+export const BACK_DOOR_EXTERIOR = 0.42;
 
 /**
  * Always-open passage on the barn's right wall into the horse pen.
@@ -161,45 +172,46 @@ export function getBarnColliders(doorState) {
       minX: -DOOR_HALF,
       maxX: DOOR_HALF,
       minZ: hd - t,
-      maxZ: hd + t,
+      maxZ: hd + t + FRONT_DOOR_EXTERIOR,
     });
   } else {
-    // Leaves slid sideways, parked over the front wall panels
+    // Leaves parked on the exterior of the side wall panels
+    const leafOut = hd + FRONT_DOOR_EXTERIOR + 0.25;
     boxes.push(
       {
         type: "box",
-        minX: -DOOR_HALF - DOOR_LEAF_W,
-        maxX: -DOOR_HALF,
-        minZ: hd - t * 0.5,
-        maxZ: hd + t * 1.3,
+        minX: -DOOR_HALF - DOOR_LEAF_W - 0.2,
+        maxX: -DOOR_HALF + 0.15,
+        minZ: hd - t * 0.3,
+        maxZ: leafOut,
       },
       {
         type: "box",
-        minX: DOOR_HALF,
-        maxX: DOOR_HALF + DOOR_LEAF_W,
-        minZ: hd - t * 0.5,
-        maxZ: hd + t * 1.3,
+        minX: DOOR_HALF - 0.15,
+        maxX: DOOR_HALF + DOOR_LEAF_W + 0.2,
+        minZ: hd - t * 0.3,
+        maxZ: leafOut,
       }
     );
   }
 
-  // Rear sliding door — closed blocks gap; open parks over right wall panel
+  // Rear sliding door — closed blocks gap; open parks outside right panel
   if (!backOpen) {
     boxes.push({
       type: "box",
       minX: -BACK_DOOR_HALF,
       maxX: BACK_DOOR_HALF,
-      minZ: -hd - t,
+      minZ: -hd - t - BACK_DOOR_EXTERIOR,
       maxZ: -hd + t,
     });
   } else {
-    // Slid open to the right, overlapping the back-right wall segment
+    // Slid open to the right, on exterior of the back-right wall
     boxes.push({
       type: "box",
-      minX: BACK_DOOR_HALF,
-      maxX: BACK_DOOR_HALF + BACK_DOOR_W,
-      minZ: -hd - t * 1.5,
-      maxZ: -hd - t * 0.3,
+      minX: BACK_DOOR_HALF - 0.1,
+      maxX: BACK_DOOR_HALF + BACK_DOOR_W + 0.25,
+      minZ: -hd - t - BACK_DOOR_EXTERIOR - 0.2,
+      maxZ: -hd - t * 0.2,
     });
   }
 
@@ -326,11 +338,14 @@ function HorseStalls() {
 /**
  * Front barn leaf that slides sideways (not hinged).
  * side: -1 left (slides -X when open), +1 right (slides +X when open).
+ * Leaves sit proud of the exterior wall so open doors stay visible parked
+ * on the outside of the side panels (not swallowed by the wall mesh).
  */
 function BarnFrontSlideLeaf({ side, doorState }) {
   const groupRef = useRef();
   const white = COLORS.white;
-  const z = BARN_DOOR_Z + 0.1;
+  // Closed still on exterior face; open parks further out for a clear read
+  const zClosed = BARN_DOOR_Z + FRONT_DOOR_EXTERIOR;
   // Closed: each leaf fills half the opening (centers at ±DOOR_LEAF_W/2)
   const closedX = side * (DOOR_LEAF_W / 2);
 
@@ -343,45 +358,71 @@ function BarnFrontSlideLeaf({ side, doorState }) {
     doorState[key] = Math.abs(next - target) < 0.01 ? target : next;
     // Left moves -X, right moves +X
     groupRef.current.position.x = closedX + side * doorState[key];
+    // Nudge slightly further out while open so they read as wall-mounted
+    const t = doorState[key] / Math.max(0.001, FRONT_DOOR_SLIDE);
+    groupRef.current.position.z = zClosed + t * 0.12;
   });
 
+  const leafT = 0.2;
+  const face = leafT / 2 + 0.02;
+
   return (
-    <group ref={groupRef} position={[closedX, DOOR_LEAF_H / 2 + 0.12, z]}>
+    <group ref={groupRef} position={[closedX, DOOR_LEAF_H / 2 + 0.12, zClosed]}>
       <mesh castShadow receiveShadow>
-        <boxGeometry args={[DOOR_LEAF_W, DOOR_LEAF_H, 0.16]} />
+        <boxGeometry args={[DOOR_LEAF_W, DOOR_LEAF_H, leafT]} />
         <meshToonMaterial color={COLORS.woodDark} />
-        <Outlines color={COLORS.outline} thickness={1.5} />
+        <Outlines color={COLORS.outline} thickness={1.8} />
       </mesh>
-      {/* Vertical planks */}
+      {/* Exterior face (+Z) — planks, braces, rails */}
       {[-1.4, -0.45, 0.45, 1.4].map((ox, i) => (
-        <mesh key={i} position={[ox, 0, 0.09]}>
+        <mesh key={`e-plank-${i}`} position={[ox, 0, face]}>
           <boxGeometry args={[0.08, DOOR_LEAF_H - 0.25, 0.04]} />
           <meshToonMaterial color={COLORS.wood} />
         </mesh>
       ))}
-      {/* White cross braces */}
-      <mesh rotation={[0, 0, Math.PI / 4]} position={[0, 0, 0.1]}>
+      <mesh rotation={[0, 0, Math.PI / 4]} position={[0, 0, face + 0.01]}>
         <boxGeometry args={[DOOR_LEAF_W * 0.95, 0.16, 0.05]} />
         <meshToonMaterial color={white} />
       </mesh>
-      <mesh rotation={[0, 0, -Math.PI / 4]} position={[0, 0, 0.1]}>
+      <mesh rotation={[0, 0, -Math.PI / 4]} position={[0, 0, face + 0.01]}>
         <boxGeometry args={[DOOR_LEAF_W * 0.95, 0.16, 0.05]} />
         <meshToonMaterial color={white} />
       </mesh>
-      {/* Horizontal rails */}
-      <mesh position={[0, DOOR_LEAF_H * 0.38, 0.09]}>
+      <mesh position={[0, DOOR_LEAF_H * 0.38, face]}>
         <boxGeometry args={[DOOR_LEAF_W - 0.15, 0.14, 0.05]} />
         <meshToonMaterial color={white} />
       </mesh>
-      <mesh position={[0, -DOOR_LEAF_H * 0.38, 0.09]}>
+      <mesh position={[0, -DOOR_LEAF_H * 0.38, face]}>
         <boxGeometry args={[DOOR_LEAF_W - 0.15, 0.14, 0.05]} />
         <meshToonMaterial color={white} />
       </mesh>
-      {/* Handle toward the meeting edge */}
-      <mesh position={[-side * (DOOR_LEAF_W * 0.35), 0, 0.13]} castShadow>
+      {/* Interior face (−Z) so open leaves look solid from the yard too */}
+      {[-1.4, -0.45, 0.45, 1.4].map((ox, i) => (
+        <mesh key={`i-plank-${i}`} position={[ox, 0, -face]}>
+          <boxGeometry args={[0.08, DOOR_LEAF_H - 0.25, 0.04]} />
+          <meshToonMaterial color={COLORS.wood} />
+        </mesh>
+      ))}
+      <mesh rotation={[0, 0, Math.PI / 4]} position={[0, 0, -face - 0.01]}>
+        <boxGeometry args={[DOOR_LEAF_W * 0.9, 0.14, 0.04]} />
+        <meshToonMaterial color={white} />
+      </mesh>
+      <mesh rotation={[0, 0, -Math.PI / 4]} position={[0, 0, -face - 0.01]}>
+        <boxGeometry args={[DOOR_LEAF_W * 0.9, 0.14, 0.04]} />
+        <meshToonMaterial color={white} />
+      </mesh>
+      {/* Exterior handle toward the meeting edge */}
+      <mesh position={[-side * (DOOR_LEAF_W * 0.35), 0, face + 0.04]} castShadow>
         <boxGeometry args={[0.12, 0.38, 0.1]} />
         <meshToonMaterial color={COLORS.gold} />
       </mesh>
+      {/* Roller hangers on the exterior track */}
+      {[-DOOR_LEAF_W * 0.32, DOOR_LEAF_W * 0.32].map((ox, i) => (
+        <mesh key={`hanger-${i}`} position={[ox, DOOR_LEAF_H * 0.48, face + 0.02]} castShadow>
+          <boxGeometry args={[0.22, 0.18, 0.12]} />
+          <meshToonMaterial color={COLORS.stoneDark} />
+        </mesh>
+      ))}
     </group>
   );
 }
@@ -491,12 +532,14 @@ function BarnFloorStraw() {
   );
 }
 
-/** Sliding barn door on the back wall (slides +X when open) */
+/** Sliding barn door on the back wall (slides +X when open, parks outside) */
 function BarnBackSlideDoor({ doorState }) {
   const groupRef = useRef();
   const white = COLORS.white;
-  const z = BARN_BACK_Z - 0.1;
+  const zClosed = BARN_BACK_Z - BACK_DOOR_EXTERIOR;
   const closedX = 0; // door centered on opening
+  const leafT = 0.2;
+  const faceOut = -(leafT / 2 + 0.02); // exterior is −Z on back wall
 
   useFrame((_, delta) => {
     if (!groupRef.current || !doorState) return;
@@ -505,34 +548,49 @@ function BarnBackSlideDoor({ doorState }) {
     const next = cur + (target - cur) * Math.min(1, delta * 5);
     doorState.backSlide = Math.abs(next - target) < 0.01 ? target : next;
     groupRef.current.position.x = closedX + doorState.backSlide;
+    const t = doorState.backSlide / Math.max(0.001, BACK_DOOR_SLIDE);
+    groupRef.current.position.z = zClosed - t * 0.12;
   });
 
   return (
-    <group ref={groupRef} position={[closedX, BACK_DOOR_H / 2 + 0.15, z]}>
+    <group ref={groupRef} position={[closedX, BACK_DOOR_H / 2 + 0.15, zClosed]}>
       <mesh castShadow receiveShadow>
-        <boxGeometry args={[BACK_DOOR_W, BACK_DOOR_H, 0.18]} />
+        <boxGeometry args={[BACK_DOOR_W, BACK_DOOR_H, leafT]} />
         <meshToonMaterial color={COLORS.woodDark} />
-        <Outlines color={COLORS.outline} thickness={1.5} />
+        <Outlines color={COLORS.outline} thickness={1.8} />
       </mesh>
-      {/* Vertical planks look */}
+      {/* Exterior face (−Z) */}
       {[-1.5, -0.5, 0.5, 1.5].map((ox, i) => (
-        <mesh key={i} position={[ox, 0, 0.1]}>
+        <mesh key={`e-${i}`} position={[ox, 0, faceOut]}>
           <boxGeometry args={[0.08, BACK_DOOR_H - 0.2, 0.04]} />
           <meshToonMaterial color={COLORS.wood} />
         </mesh>
       ))}
-      {/* Horizontal rails */}
       {[BACK_DOOR_H * 0.28, -BACK_DOOR_H * 0.28].map((oy, i) => (
-        <mesh key={`r-${i}`} position={[0, oy, 0.11]}>
+        <mesh key={`er-${i}`} position={[0, oy, faceOut - 0.01]}>
           <boxGeometry args={[BACK_DOOR_W - 0.15, 0.12, 0.05]} />
           <meshToonMaterial color={white} />
         </mesh>
       ))}
-      {/* Handle */}
-      <mesh position={[-BACK_DOOR_HALF + 0.35, 0, 0.14]} castShadow>
+      {/* Interior face (+Z) */}
+      {[-1.5, -0.5, 0.5, 1.5].map((ox, i) => (
+        <mesh key={`i-${i}`} position={[ox, 0, -faceOut]}>
+          <boxGeometry args={[0.08, BACK_DOOR_H - 0.2, 0.04]} />
+          <meshToonMaterial color={COLORS.wood} />
+        </mesh>
+      ))}
+      {/* Exterior handle */}
+      <mesh position={[-BACK_DOOR_HALF + 0.35, 0, faceOut - 0.04]} castShadow>
         <boxGeometry args={[0.12, 0.35, 0.1]} />
         <meshToonMaterial color={COLORS.gold} />
       </mesh>
+      {/* Roller hangers */}
+      {[-BACK_DOOR_W * 0.28, BACK_DOOR_W * 0.28].map((ox, i) => (
+        <mesh key={`bh-${i}`} position={[ox, BACK_DOOR_H * 0.48, faceOut]} castShadow>
+          <boxGeometry args={[0.22, 0.18, 0.12]} />
+          <meshToonMaterial color={COLORS.stoneDark} />
+        </mesh>
+      ))}
     </group>
   );
 }
@@ -816,10 +874,18 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
         <meshToonMaterial color={red} />
         <Outlines color={COLORS.outline} thickness={2} />
       </mesh>
-      {/* Track rail for sliding door */}
-      <mesh position={[BACK_DOOR_W * 0.25, BACK_DOOR_H + 0.2, backZ - 0.12]} castShadow>
-        <boxGeometry args={[BACK_DOOR_W * 1.6, 0.1, 0.12]} />
+      {/* Exterior track rail for rear sliding door */}
+      <mesh
+        position={[
+          BACK_DOOR_W * 0.35,
+          BACK_DOOR_H + 0.22,
+          backZ - BACK_DOOR_EXTERIOR - 0.06,
+        ]}
+        castShadow
+      >
+        <boxGeometry args={[BACK_DOOR_W * 1.85, 0.12, 0.16]} />
         <meshToonMaterial color={COLORS.stoneDark} />
+        <Outlines color={COLORS.outline} thickness={0.8} />
       </mesh>
       <BarnBackSlideDoor doorState={doorState} />
 
@@ -871,13 +937,16 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
         <meshToonMaterial color={red} />
         <Outlines color={COLORS.outline} thickness={2} />
       </mesh>
-      {/* Track rail for front sliding doors */}
+      {/* Exterior track rail for front sliding doors (outside face) */}
       <mesh
-        position={[0, DOOR_LEAF_H + 0.28, frontZ + 0.14]}
+        position={[0, DOOR_LEAF_H + 0.32, frontZ + FRONT_DOOR_EXTERIOR + 0.06]}
         castShadow
       >
-        <boxGeometry args={[DOOR_HALF * 2 + FRONT_DOOR_SLIDE * 1.15, 0.1, 0.14]} />
+        <boxGeometry
+          args={[DOOR_HALF * 2 + FRONT_DOOR_SLIDE * 2.15, 0.12, 0.18]}
+        />
         <meshToonMaterial color={COLORS.stoneDark} />
+        <Outlines color={COLORS.outline} thickness={0.8} />
       </mesh>
 
       {/* White corner trim */}
@@ -1014,6 +1083,12 @@ function Barn({ position = [0, 0, 0], rotation = 0, doorState }) {
  */
 export const CABIN_GAP = 12.5;
 export const BARN_HALF_W = 9;
+export const CABIN_W = 14;
+export const CABIN_D = 11;
+/** Covered back patio: full cabin width × 50% cabin depth */
+export const PATIO_W = CABIN_W;
+export const PATIO_D = CABIN_D * 0.5; // 5.5
+
 export const CABIN_YARD = {
   /** Right yard half-width (toward barn) — also used for cabin placement */
   halfW: 11,
@@ -1024,7 +1099,8 @@ export const CABIN_YARD = {
   leftW: 23.5,
   halfD: 10,
   front: 9.5, // fence front past porch/garden
-  back: 7.5,
+  /** Past cabin back wall + patio depth + a little walkway */
+  back: CABIN_D / 2 + PATIO_D + 1.5, // ~12.5
   gateHalf: 1.1,
 };
 export const CABIN_POS = {
@@ -1032,8 +1108,6 @@ export const CABIN_POS = {
   z: 0,
 };
 export const CABIN_YAW = 0;
-export const CABIN_W = 14;
-export const CABIN_D = 11;
 /** Garden plot = same footprint as the cabin, left of the house */
 export const GARDEN_W = CABIN_W;
 export const GARDEN_D = CABIN_D;
@@ -1049,9 +1123,11 @@ export const CABIN_ROOF_RISE = 2.65;
 export const CABIN_DOOR_W = 1.5;
 export const CABIN_WALL_T = 0.45;
 
-/** Cabin front door + auto picket gate */
+/** Cabin front / back door + auto picket gate */
 export const CABIN_DOOR_RANGE = 2.8;
 export const CABIN_DOOR_OPEN_ANGLE = 1.85; // ~106° open inward
+/** Back door swings open outward onto patio (−Z) */
+export const CABIN_BACK_DOOR_OPEN_ANGLE = -1.75;
 export const CABIN_GATE_OPEN_ANGLE = 1.35;
 export const CABIN_GATE_AUTO_RANGE = 3.2;
 
@@ -1074,6 +1150,9 @@ export function createCabinState() {
     /** Front door: interact to toggle */
     doorOpen: false,
     doorAngle: 0, // 0 closed → CABIN_DOOR_OPEN_ANGLE
+    /** Back door onto covered patio */
+    backDoorOpen: false,
+    backDoorAngle: 0, // 0 closed → CABIN_BACK_DOOR_OPEN_ANGLE
     /** Main picket gate (path) — double leaf, push-to-open with direction */
     mainGate: makeSwingGateState(),
     /** Garden front — single swing, push-to-open */
@@ -1099,6 +1178,16 @@ export function getCabinDoorWorld() {
 
 export function distToCabinDoor(x, z) {
   const d = getCabinDoorWorld();
+  return Math.hypot(x - d.x, z - d.z);
+}
+
+/** World position of cabin back door (onto patio) */
+export function getCabinBackDoorWorld() {
+  return cabinLocalToWorld(0, -CABIN_D / 2 - 0.4);
+}
+
+export function distToCabinBackDoor(x, z) {
+  const d = getCabinBackDoorWorld();
   return Math.hypot(x - d.x, z - d.z);
 }
 
@@ -1220,16 +1309,19 @@ export function getCabinColliders(cabinState) {
   if (doorClosed) {
     boxes.push(cabinWallBox(-door, door, hd - t / 2, hd + t / 2));
   }
-  // Back wall
-  boxes.push(cabinWallBox(-hw, hw, -hd - t / 2, -hd + t / 2));
+  // Back wall — left & right of patio door
+  boxes.push(cabinWallBox(-hw, -door, -hd - t / 2, -hd + t / 2));
+  boxes.push(cabinWallBox(door, hw, -hd - t / 2, -hd + t / 2));
+  const backDoorClosed =
+    !cabinState?.backDoorOpen &&
+    Math.abs(cabinState?.backDoorAngle ?? 0) < 0.25;
+  if (backDoorClosed) {
+    boxes.push(cabinWallBox(-door, door, -hd - t / 2, -hd + t / 2));
+  }
   // Left / right outer walls
   boxes.push(cabinWallBox(-hw - t / 2, -hw + t / 2, -hd, hd));
   boxes.push(cabinWallBox(hw - t / 2, hw + t / 2, -hd, hd));
-  // Interior partition (main ↔ bedroom), gap for doorway
-  const pz = -0.5;
-  boxes.push(cabinWallBox(-hw + 0.2, -0.7, pz - t / 2, pz + t / 2));
-  boxes.push(cabinWallBox(0.7, hw - 0.2, pz - t / 2, pz + t / 2));
-  // Chimney mass (right-back exterior)
+  // Chimney mass (right-back exterior, clear of patio door)
   boxes.push(cabinWallBox(hw - 0.2, hw + 1.1, -hd + 0.3, -hd + 1.7));
 
   return boxes;
@@ -1562,10 +1654,565 @@ function CabinFrontDoor({ doorW, frontZ, cabinState }) {
 }
 
 /**
- * Western log cabin — hollow shell, 2 rooms (main + bedroom),
- * white transparent windows, openable front door, porch + chimney.
+ * Back door onto the covered patio. Hinge on the left (−X), swings open
+ * outward (−Z / negative Y rot) onto the patio.
  */
-function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
+function CabinBackDoor({ doorW, backZ, cabinState }) {
+  const hingeRef = useRef();
+  useFrame((_, delta) => {
+    if (!hingeRef.current || !cabinState) return;
+    const target = cabinState.backDoorOpen ? CABIN_BACK_DOOR_OPEN_ANGLE : 0;
+    const cur = cabinState.backDoorAngle ?? 0;
+    const next = cur + (target - cur) * Math.min(1, delta * 6);
+    cabinState.backDoorAngle = Math.abs(next - target) < 0.01 ? target : next;
+    hingeRef.current.rotation.y = cabinState.backDoorAngle;
+  });
+  return (
+    <group
+      ref={hingeRef}
+      position={[-doorW / 2 + 0.05, 1.28, backZ - 0.05]}
+    >
+      <mesh position={[doorW / 2, 0, 0]} castShadow>
+        <boxGeometry args={[doorW - 0.08, 2.5, 0.1]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+        <Outlines color={COLORS.outline} thickness={1.2} />
+      </mesh>
+      {/* Window pane in upper half */}
+      <mesh position={[doorW / 2, 0.45, -0.06]}>
+        <boxGeometry args={[doorW - 0.35, 0.7, 0.03]} />
+        <meshToonMaterial
+          color="#e8f0f8"
+          transparent
+          opacity={0.45}
+          depthWrite={false}
+        />
+      </mesh>
+      <mesh position={[doorW - 0.28, -0.15, -0.08]}>
+        <sphereGeometry args={[0.07, 6, 6]} />
+        <meshToonMaterial color={COLORS.gold} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Mesh kits for movable cabin furniture (local origin = placement point). */
+
+function FridgeMesh() {
+  const fridgeGreen = "#3d6b45";
+  const fridgeGreenDark = "#2a4a30";
+  const fridgeChrome = "#c8cdd4";
+  return (
+    <group>
+      <mesh position={[0, 1.05, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.85, 2.05, 0.95]} />
+        <meshToonMaterial color={fridgeGreen} />
+        <Outlines color={COLORS.outline} thickness={1.4} />
+      </mesh>
+      <mesh position={[0, 2.12, 0]} castShadow>
+        <boxGeometry args={[0.88, 0.12, 0.98]} />
+        <meshToonMaterial color={fridgeGreenDark} />
+      </mesh>
+      <mesh position={[0.44, 1.62, 0]} castShadow>
+        <boxGeometry args={[0.06, 0.72, 0.88]} />
+        <meshToonMaterial color={fridgeGreenDark} />
+        <Outlines color={COLORS.outline} thickness={0.8} />
+      </mesh>
+      <mesh position={[0.44, 0.72, 0]} castShadow>
+        <boxGeometry args={[0.06, 1.05, 0.88]} />
+        <meshToonMaterial color={fridgeGreen} />
+        <Outlines color={COLORS.outline} thickness={0.8} />
+      </mesh>
+      <mesh position={[0.5, 1.55, -0.28]} castShadow>
+        <boxGeometry args={[0.08, 0.28, 0.06]} />
+        <meshToonMaterial color={fridgeChrome} />
+      </mesh>
+      <mesh position={[0.5, 1.05, -0.28]} castShadow>
+        <boxGeometry args={[0.08, 0.42, 0.06]} />
+        <meshToonMaterial color={fridgeChrome} />
+      </mesh>
+      <mesh position={[0.48, 1.35, 0.18]}>
+        <boxGeometry args={[0.03, 0.1, 0.28]} />
+        <meshToonMaterial color={fridgeChrome} />
+      </mesh>
+    </group>
+  );
+}
+
+function SinkMesh() {
+  const sinkMetal = "#9aa3ad";
+  const sinkMetalDark = "#6a727c";
+  const porcelain = "#f2efe6";
+  const fridgeChrome = "#c8cdd4";
+  return (
+    <group>
+      <mesh position={[0, 0.42, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.72, 0.84, 1.15]} />
+        <meshToonMaterial color={COLORS.wood} />
+        <Outlines color={COLORS.outline} thickness={1.2} />
+      </mesh>
+      <mesh position={[0.37, 0.4, 0.02]}>
+        <boxGeometry args={[0.03, 0.7, 1.0]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+      </mesh>
+      <mesh position={[0, 0.88, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.8, 0.08, 1.25]} />
+        <meshToonMaterial color={sinkMetal} />
+        <Outlines color={COLORS.outline} thickness={1} />
+      </mesh>
+      <mesh position={[0.02, 0.78, 0.28]} castShadow>
+        <boxGeometry args={[0.48, 0.22, 0.55]} />
+        <meshToonMaterial color={sinkMetalDark} />
+      </mesh>
+      <mesh position={[0.02, 0.86, 0.28]}>
+        <boxGeometry args={[0.4, 0.08, 0.48]} />
+        <meshToonMaterial color={porcelain} />
+      </mesh>
+      <mesh position={[-0.22, 1.05, 0.28]} castShadow>
+        <cylinderGeometry args={[0.04, 0.05, 0.35, 6]} />
+        <meshToonMaterial color={fridgeChrome} />
+      </mesh>
+      <mesh position={[-0.05, 1.28, 0.28]} rotation={[0, 0, -0.9]} castShadow>
+        <cylinderGeometry args={[0.035, 0.035, 0.38, 6]} />
+        <meshToonMaterial color={fridgeChrome} />
+      </mesh>
+      <mesh position={[-0.38, 1.15, 0]} castShadow>
+        <boxGeometry args={[0.06, 0.45, 1.2]} />
+        <meshToonMaterial color={COLORS.woodLight} />
+      </mesh>
+    </group>
+  );
+}
+
+function TableMesh() {
+  const tableTop = "#8a5a30";
+  const tableLeg = COLORS.woodDark;
+  const benchWood = "#7a4e28";
+  const porcelain = "#f2efe6";
+  const tableLen = 2.55;
+  const tableW = 0.95;
+  const tableH = 0.78;
+  return (
+    <group>
+      <mesh position={[0, tableH, 0]} castShadow receiveShadow>
+        <boxGeometry args={[tableLen, 0.1, tableW]} />
+        <meshToonMaterial color={tableTop} />
+        <Outlines color={COLORS.outline} thickness={1.3} />
+      </mesh>
+      {[
+        [-tableLen / 2 + 0.18, -tableW / 2 + 0.12],
+        [tableLen / 2 - 0.18, -tableW / 2 + 0.12],
+        [-tableLen / 2 + 0.18, tableW / 2 - 0.12],
+        [tableLen / 2 - 0.18, tableW / 2 - 0.12],
+      ].map(([x, z], i) => (
+        <mesh key={`leg-${i}`} position={[x, tableH / 2 - 0.02, z]} castShadow>
+          <cylinderGeometry args={[0.06, 0.075, tableH - 0.08, 6]} />
+          <meshToonMaterial color={tableLeg} />
+        </mesh>
+      ))}
+      {[-1, 1].map((side, i) => {
+        const bz = side * (tableW / 2 + 0.42);
+        const benchLen = tableLen - 0.15;
+        const seatH = 0.46;
+        return (
+          <group key={`bench-${i}`} position={[0, 0, bz]}>
+            <mesh position={[0, seatH, 0]} castShadow receiveShadow>
+              <boxGeometry args={[benchLen, 0.09, 0.38]} />
+              <meshToonMaterial color={benchWood} />
+              <Outlines color={COLORS.outline} thickness={1.1} />
+            </mesh>
+          </group>
+        );
+      })}
+      <mesh position={[0.05, tableH + 0.12, 0]} castShadow>
+        <cylinderGeometry args={[0.08, 0.1, 0.16, 6]} />
+        <meshToonMaterial color="#c44a3a" />
+      </mesh>
+      <mesh position={[-0.55, tableH + 0.08, 0.12]}>
+        <cylinderGeometry args={[0.1, 0.1, 0.04, 8]} />
+        <meshToonMaterial color={porcelain} />
+      </mesh>
+      {/* Rug under table (moves with table) */}
+      <mesh position={[0, 0.085, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[3.4, 2.4]} />
+        <meshToonMaterial color="#6a3a28" />
+      </mesh>
+    </group>
+  );
+}
+
+/** Bed origin = mattress/frame center; headboard toward +X (right wall default). */
+function BedMesh() {
+  const bedW = 1.7;
+  const bedL = 2.25;
+  return (
+    <group>
+      <mesh position={[bedL / 2 + 0.05, 1.0, 0]} castShadow>
+        <boxGeometry args={[0.12, 1.15, bedW + 0.12]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+        <Outlines color={COLORS.outline} thickness={1.2} />
+      </mesh>
+      <mesh position={[0, 0.36, 0]} castShadow receiveShadow>
+        <boxGeometry args={[bedL, 0.36, bedW]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+        <Outlines color={COLORS.outline} thickness={1} />
+      </mesh>
+      <mesh position={[0, 0.62, 0]} castShadow>
+        <boxGeometry args={[bedL - 0.12, 0.2, bedW - 0.12]} />
+        <meshToonMaterial color="#c8b090" />
+      </mesh>
+      <mesh position={[bedL / 2 - 0.35, 0.78, -0.35]} castShadow>
+        <boxGeometry args={[0.38, 0.18, 0.55]} />
+        <meshToonMaterial color="#e8dcc8" />
+      </mesh>
+      <mesh position={[bedL / 2 - 0.35, 0.78, 0.35]} castShadow>
+        <boxGeometry args={[0.38, 0.18, 0.55]} />
+        <meshToonMaterial color="#e8dcc8" />
+      </mesh>
+      <mesh position={[-bedL * 0.22, 0.72, 0]} castShadow>
+        <boxGeometry args={[bedL * 0.32, 0.08, bedW - 0.18]} />
+        <meshToonMaterial color="#6a4a32" />
+      </mesh>
+    </group>
+  );
+}
+
+function NightstandMesh() {
+  return (
+    <group>
+      <mesh position={[0, 0.42, 0]} castShadow>
+        <boxGeometry args={[0.55, 0.75, 0.55]} />
+        <meshToonMaterial color={COLORS.wood} />
+        <Outlines color={COLORS.outline} thickness={1} />
+      </mesh>
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <cylinderGeometry args={[0.09, 0.11, 0.22, 6]} />
+        <meshToonMaterial color="#f0e8d0" />
+      </mesh>
+    </group>
+  );
+}
+
+function LeatherChairMesh() {
+  const leather = "#4a3024";
+  const leatherDark = "#2e1e16";
+  const leatherHi = "#6a4834";
+  return (
+    <group>
+      <mesh position={[0, 0.38, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.85, 0.22, 0.8]} />
+        <meshToonMaterial color={leather} />
+        <Outlines color={COLORS.outline} thickness={1.1} />
+      </mesh>
+      <mesh position={[0, 0.85, -0.28]} castShadow>
+        <boxGeometry args={[0.85, 0.85, 0.16]} />
+        <meshToonMaterial color={leatherDark} />
+        <Outlines color={COLORS.outline} thickness={1} />
+      </mesh>
+      {[-1, 1].map((s) => (
+        <mesh key={`arm-${s}`} position={[s * 0.4, 0.55, 0.05]} castShadow>
+          <boxGeometry args={[0.12, 0.35, 0.7]} />
+          <meshToonMaterial color={leatherHi} />
+        </mesh>
+      ))}
+      <mesh position={[0, 0.52, 0.05]} castShadow>
+        <boxGeometry args={[0.7, 0.12, 0.55]} />
+        <meshToonMaterial color={leatherHi} />
+      </mesh>
+    </group>
+  );
+}
+
+const FURNITURE_MESH = {
+  bed: BedMesh,
+  nightstand: NightstandMesh,
+  fridge: FridgeMesh,
+  sink: SinkMesh,
+  table: TableMesh,
+  chair1: LeatherChairMesh,
+  chair2: LeatherChairMesh,
+};
+
+/**
+ * Renders movable cabin furniture from furnitureState and follows the player
+ * while a piece is being carried (useFrame).
+ */
+function CabinMovableFurniture({ furnitureState, playerTrack }) {
+  const groupRefs = useRef({});
+
+  useFrame(() => {
+    if (!furnitureState?.items) return;
+    if (furnitureState.movingId && playerTrack?.position) {
+      updateMovingFurniture(
+        furnitureState,
+        playerTrack.position.x,
+        playerTrack.position.z,
+        playerTrack.yaw ?? 0
+      );
+    }
+    for (const item of furnitureState.items) {
+      const g = groupRefs.current[item.id];
+      if (!g) continue;
+      g.position.set(item.x, 0, item.z);
+      g.rotation.y = item.yaw || 0;
+      // Lift slightly while moving so it reads as "carried"
+      g.position.y = furnitureState.movingId === item.id ? 0.12 : 0;
+    }
+  });
+
+  if (!furnitureState?.items) return null;
+
+  return (
+    <group userData={{ ignoreCameraCollision: true }}>
+      {furnitureState.items.map((item) => {
+        const Mesh = FURNITURE_MESH[item.id];
+        if (!Mesh) return null;
+        return (
+          <group
+            key={item.id}
+            ref={(el) => {
+              if (el) groupRefs.current[item.id] = el;
+            }}
+            position={[item.x, 0, item.z]}
+            rotation={[0, item.yaw || 0, 0]}
+          >
+            <Mesh />
+          </group>
+        );
+      })}
+    </group>
+  );
+}
+
+/**
+ * Covered back patio: cabin width × 50% cabin depth.
+ * Stone fireplace with chairs/benches around a fire pit seating circle.
+ */
+function CabinBackPatio() {
+  const backZ = -CABIN_D / 2;
+  // Deck runs from cabin back wall outward (−Z)
+  const deckMidZ = backZ - PATIO_D / 2;
+  const roofY = 2.85;
+  const postH = 2.7;
+  // Fireplace near the far edge of the patio
+  const fireZ = backZ - PATIO_D * 0.72;
+  const seatR = 1.55;
+
+  return (
+    <group userData={{ ignoreCameraCollision: true }}>
+      {/* Deck floor — full cabin width × half depth */}
+      <mesh position={[0, 0.07, deckMidZ]} receiveShadow castShadow>
+        <boxGeometry args={[PATIO_W, 0.14, PATIO_D]} />
+        <meshToonMaterial color={COLORS.wood} />
+        <Outlines color={COLORS.outline} thickness={1.4} />
+      </mesh>
+      {/* Deck board lines */}
+      {Array.from({ length: 10 }).map((_, i) => (
+        <mesh
+          key={`deck-line-${i}`}
+          position={[(i - 4.5) * (PATIO_W / 10), 0.145, deckMidZ]}
+          rotation={[-Math.PI / 2, 0, 0]}
+        >
+          <planeGeometry args={[0.04, PATIO_D - 0.2]} />
+          <meshToonMaterial color={COLORS.woodDark} />
+        </mesh>
+      ))}
+      {/* Perimeter beam */}
+      <mesh position={[0, 0.18, backZ - PATIO_D]} castShadow>
+        <boxGeometry args={[PATIO_W + 0.15, 0.12, 0.16]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+      </mesh>
+      <mesh position={[-PATIO_W / 2, 0.18, deckMidZ]} castShadow>
+        <boxGeometry args={[0.16, 0.12, PATIO_D]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+      </mesh>
+      <mesh position={[PATIO_W / 2, 0.18, deckMidZ]} castShadow>
+        <boxGeometry args={[0.16, 0.12, PATIO_D]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+      </mesh>
+
+      {/* Cover posts + roof */}
+      {[
+        [-PATIO_W / 2 + 0.35, backZ - 0.35],
+        [PATIO_W / 2 - 0.35, backZ - 0.35],
+        [-PATIO_W / 2 + 0.35, backZ - PATIO_D + 0.35],
+        [PATIO_W / 2 - 0.35, backZ - PATIO_D + 0.35],
+        [0, backZ - PATIO_D + 0.35],
+      ].map(([x, z], i) => (
+        <mesh key={`pp-${i}`} position={[x, postH / 2 + 0.1, z]} castShadow>
+          <cylinderGeometry args={[0.11, 0.13, postH, 6]} />
+          <meshToonMaterial color={COLORS.woodDark} />
+          <Outlines color={COLORS.outline} thickness={0.9} />
+        </mesh>
+      ))}
+      {/* Beams */}
+      <mesh position={[0, roofY - 0.15, backZ - 0.35]} castShadow>
+        <boxGeometry args={[PATIO_W - 0.2, 0.16, 0.18]} />
+        <meshToonMaterial color={COLORS.wood} />
+      </mesh>
+      <mesh position={[0, roofY - 0.15, backZ - PATIO_D + 0.35]} castShadow>
+        <boxGeometry args={[PATIO_W - 0.2, 0.16, 0.18]} />
+        <meshToonMaterial color={COLORS.wood} />
+      </mesh>
+      {[-PATIO_W / 2 + 0.35, PATIO_W / 2 - 0.35, 0].map((x, i) => (
+        <mesh key={`beam-${i}`} position={[x, roofY - 0.15, deckMidZ]} castShadow>
+          <boxGeometry args={[0.16, 0.14, PATIO_D - 0.5]} />
+          <meshToonMaterial color={COLORS.wood} />
+        </mesh>
+      ))}
+      {/* Covered roof slab (slight pitch away from house) */}
+      <mesh
+        position={[0, roofY + 0.12, deckMidZ]}
+        rotation={[-0.08, 0, 0]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry args={[PATIO_W + 0.5, 0.14, PATIO_D + 0.55]} />
+        <meshToonMaterial color={COLORS.roof} />
+        <Outlines color={COLORS.outline} thickness={1.5} />
+      </mesh>
+      {/* Rafter hints under roof */}
+      {Array.from({ length: 7 }).map((_, i) => (
+        <mesh
+          key={`raft-${i}`}
+          position={[(i - 3) * (PATIO_W / 7), roofY - 0.02, deckMidZ]}
+          castShadow
+        >
+          <boxGeometry args={[0.08, 0.1, PATIO_D - 0.3]} />
+          <meshToonMaterial color={COLORS.woodDark} />
+        </mesh>
+      ))}
+
+      {/* ---- Stone outdoor fireplace (far end of patio) ---- */}
+      <group position={[0, 0, fireZ]}>
+        {/* Hearth base */}
+        <mesh position={[0, 0.22, 0]} castShadow receiveShadow>
+          <boxGeometry args={[2.4, 0.35, 1.6]} />
+          <meshToonMaterial color={COLORS.stone} />
+          <Outlines color={COLORS.outline} thickness={1.3} />
+        </mesh>
+        {/* Firebox shell */}
+        <mesh position={[0, 1.15, -0.15]} castShadow>
+          <boxGeometry args={[1.9, 1.5, 1.1]} />
+          <meshToonMaterial color={COLORS.stoneDark} />
+          <Outlines color={COLORS.outline} thickness={1.3} />
+        </mesh>
+        {/* Fire opening */}
+        <mesh position={[0, 0.85, 0.42]}>
+          <boxGeometry args={[1.15, 0.9, 0.12]} />
+          <meshToonMaterial color="#1a120c" />
+        </mesh>
+        {/* Glow / fire */}
+        <mesh position={[0, 0.75, 0.2]}>
+          <boxGeometry args={[0.7, 0.55, 0.4]} />
+          <meshToonMaterial color="#e87830" />
+        </mesh>
+        <mesh position={[0, 0.95, 0.15]}>
+          <boxGeometry args={[0.4, 0.35, 0.25]} />
+          <meshToonMaterial color="#f0c040" />
+        </mesh>
+        {/* Chimney stack */}
+        <mesh position={[0, 2.4, -0.15]} castShadow>
+          <boxGeometry args={[0.85, 1.2, 0.85]} />
+          <meshToonMaterial color={COLORS.stone} />
+          <Outlines color={COLORS.outline} thickness={1} />
+        </mesh>
+        <mesh position={[0, 3.1, -0.15]} castShadow>
+          <boxGeometry args={[1.05, 0.22, 1.05]} />
+          <meshToonMaterial color={COLORS.stoneDark} />
+        </mesh>
+        {/* Mantel shelf */}
+        <mesh position={[0, 1.55, 0.45]} castShadow>
+          <boxGeometry args={[2.1, 0.1, 0.35]} />
+          <meshToonMaterial color={COLORS.woodDark} />
+        </mesh>
+      </group>
+
+      {/* Sitting circle around the fireplace */}
+      {[
+        { a: 0.35, kind: "chair" },
+        { a: 0.85, kind: "chair" },
+        { a: 1.35, kind: "bench" },
+        { a: 1.85, kind: "chair" },
+        { a: 2.35, kind: "chair" },
+        { a: 2.85, kind: "bench" },
+      ].map(({ a, kind }, i) => {
+        // Arc in front of fireplace (toward cabin / +Z side of fire)
+        const ang = Math.PI * 0.15 + a * 0.55;
+        // Place seats on the cabin side of the fireplace
+        const sx = Math.cos(ang) * seatR;
+        const sz = fireZ + Math.sin(ang) * seatR * 0.85 + 0.35;
+        const yaw = Math.atan2(-sx, fireZ - sz);
+        if (kind === "bench") {
+          return (
+            <group key={`seat-${i}`} position={[sx, 0.14, sz]} rotation={[0, yaw, 0]}>
+              <mesh position={[0, 0.38, 0]} castShadow receiveShadow>
+                <boxGeometry args={[1.35, 0.1, 0.42]} />
+                <meshToonMaterial color="#6a4224" />
+                <Outlines color={COLORS.outline} thickness={1} />
+              </mesh>
+              <mesh position={[0, 0.7, -0.14]} castShadow>
+                <boxGeometry args={[1.35, 0.55, 0.1]} />
+                <meshToonMaterial color="#5a3620" />
+              </mesh>
+              {[-0.55, 0.55].map((ox, j) => (
+                <mesh key={j} position={[ox, 0.2, 0.1]} castShadow>
+                  <boxGeometry args={[0.08, 0.38, 0.08]} />
+                  <meshToonMaterial color={COLORS.woodDark} />
+                </mesh>
+              ))}
+            </group>
+          );
+        }
+        return (
+          <group key={`seat-${i}`} position={[sx, 0.14, sz]} rotation={[0, yaw, 0]}>
+            <mesh position={[0, 0.38, 0]} castShadow receiveShadow>
+              <boxGeometry args={[0.55, 0.1, 0.5]} />
+              <meshToonMaterial color="#6a4224" />
+              <Outlines color={COLORS.outline} thickness={1} />
+            </mesh>
+            <mesh position={[0, 0.72, -0.18]} castShadow>
+              <boxGeometry args={[0.55, 0.55, 0.1]} />
+              <meshToonMaterial color="#5a3620" />
+            </mesh>
+            {[
+              [-0.2, 0.18],
+              [0.2, 0.18],
+              [-0.2, -0.18],
+              [0.2, -0.18],
+            ].map(([ox, oz], j) => (
+              <mesh key={j} position={[ox, 0.2, oz]} castShadow>
+                <boxGeometry args={[0.07, 0.38, 0.07]} />
+                <meshToonMaterial color={COLORS.woodDark} />
+              </mesh>
+            ))}
+          </group>
+        );
+      })}
+
+      {/* Small side table */}
+      <mesh position={[-2.4, 0.45, fireZ + 1.1]} castShadow>
+        <cylinderGeometry args={[0.28, 0.3, 0.08, 8]} />
+        <meshToonMaterial color={COLORS.wood} />
+      </mesh>
+      <mesh position={[-2.4, 0.22, fireZ + 1.1]} castShadow>
+        <cylinderGeometry args={[0.06, 0.08, 0.4, 6]} />
+        <meshToonMaterial color={COLORS.woodDark} />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * Western log cabin — open-plan hollow shell (no center wall),
+ * white transparent windows, openable front/back doors, porch + chimney.
+ */
+function LogCabin({
+  position = [0, 0, 0],
+  rotation = 0,
+  cabinState,
+  furnitureState = null,
+  playerTrack = null,
+}) {
   const W = CABIN_W;
   const D = CABIN_D;
   const H = CABIN_H;
@@ -1577,7 +2224,6 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
   const doorW = CABIN_DOOR_W;
   const winY = 1.95;
   const winH = 1.35;
-  const partZ = -0.5; // interior partition
   const doorH = 2.55;
 
   // Build exterior wall pieces with openings (as log rows + solid fill where needed)
@@ -1647,23 +2293,23 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
                 tone={i}
               />
             )}
-            {/* Back wall — full, but window hole mid */}
-            {isWinRow ? (
+            {/* Back wall — door gap (and upper lintel / sides) for patio door */}
+            {isDoorRow ? (
               <>
                 <LogCourse
                   y={y}
-                  length={(W - 1.5) / 2}
+                  length={sideFrontW + 0.1}
                   depth={t}
                   z={backZ}
-                  x={-(W + 1.5) / 4}
+                  x={-(doorW / 2 + sideFrontW / 2)}
                   tone={i + 1}
                 />
                 <LogCourse
                   y={y}
-                  length={(W - 1.5) / 2}
+                  length={sideFrontW + 0.1}
                   depth={t}
                   z={backZ}
-                  x={(W + 1.5) / 4}
+                  x={doorW / 2 + sideFrontW / 2}
                   tone={i + 1}
                 />
               </>
@@ -1761,23 +2407,6 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
         </mesh>
       ))}
 
-      {/* === Interior partition (bedroom / main) === */}
-      <mesh position={[-3.6, H / 2, partZ]} castShadow receiveShadow>
-        <boxGeometry args={[W / 2 - 1.1, H - 0.15, 0.24]} />
-        <meshToonMaterial color={COLORS.wood} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      <mesh position={[3.6, H / 2, partZ]} castShadow receiveShadow>
-        <boxGeometry args={[W / 2 - 1.1, H - 0.15, 0.24]} />
-        <meshToonMaterial color={COLORS.wood} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      {/* Partition lintel */}
-      <mesh position={[0, H - 0.4, partZ]} castShadow>
-        <boxGeometry args={[1.7, 0.8, 0.24]} />
-        <meshToonMaterial color={COLORS.woodDark} />
-      </mesh>
-
       {/* === Roof (taller peak) === */}
       <mesh
         position={[0, H + CABIN_ROOF_RISE * 0.55, D / 4 + 0.1]}
@@ -1809,6 +2438,8 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
 
       {/* === Front door (interact open/close) === */}
       <CabinFrontDoor doorW={doorW} frontZ={frontZ} cabinState={cabinState} />
+      {/* === Back door onto covered patio === */}
+      <CabinBackDoor doorW={doorW} backZ={backZ} cabinState={cabinState} />
 
       {/* === Transparent white windows === */}
       <CabinWindow
@@ -1821,10 +2452,17 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
         width={1.45}
         height={winH}
       />
+      {/* Back wall windows flanking the patio door */}
       <CabinWindow
-        position={[0, winY, backZ - 0.24]}
+        position={[-(doorW / 2 + sideFrontW * 0.55), winY, backZ - 0.24]}
         rotation={[0, Math.PI, 0]}
-        width={1.8}
+        width={1.45}
+        height={winH}
+      />
+      <CabinWindow
+        position={[doorW / 2 + sideFrontW * 0.55, winY, backZ - 0.24]}
+        rotation={[0, Math.PI, 0]}
+        width={1.45}
         height={winH}
       />
       <CabinWindow
@@ -1840,40 +2478,7 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
         height={winH}
       />
 
-      {/* === MAIN ROOM furniture (front half) === */}
-      <mesh position={[-2.0, 0.75, 1.8]} castShadow>
-        <boxGeometry args={[2.0, 0.1, 1.1]} />
-        <meshToonMaterial color={COLORS.woodDark} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      {[
-        [-2.7, 1.4],
-        [-1.3, 1.4],
-        [-2.7, 2.2],
-        [-1.3, 2.2],
-      ].map(([x, z], i) => (
-        <mesh key={`tl-${i}`} position={[x, 0.38, z]} castShadow>
-          <cylinderGeometry args={[0.05, 0.06, 0.7, 5]} />
-          <meshToonMaterial color={COLORS.wood} />
-        </mesh>
-      ))}
-      <mesh position={[-2.0, 0.45, 2.75]} castShadow>
-        <boxGeometry args={[0.5, 0.12, 0.5]} />
-        <meshToonMaterial color={COLORS.wood} />
-      </mesh>
-      <mesh position={[-2.0, 0.75, 2.9]} castShadow>
-        <boxGeometry args={[0.5, 0.55, 0.08]} />
-        <meshToonMaterial color={COLORS.woodDark} />
-      </mesh>
-      <mesh position={[-5.2, 0.75, 3.2]} castShadow>
-        <boxGeometry args={[1.3, 1.4, 1.0]} />
-        <meshToonMaterial color={COLORS.stoneDark} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      <mesh position={[-5.2, 0.55, 3.4]}>
-        <boxGeometry args={[0.55, 0.4, 0.15]} />
-        <meshToonMaterial color="#2a1a10" />
-      </mesh>
+      {/* Shelf + jar on right wall (fixed décor) */}
       <mesh position={[4.5, 1.7, 2.0]} castShadow>
         <boxGeometry args={[1.1, 0.08, 0.4]} />
         <meshToonMaterial color={COLORS.wood} />
@@ -1883,37 +2488,51 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
         <meshToonMaterial color="#c44a3a" />
       </mesh>
 
-      {/* === BEDROOM furniture (back half) === */}
-      <mesh position={[2.4, 0.38, -3.0]} castShadow>
-        <boxGeometry args={[2.5, 0.38, 1.6]} />
-        <meshToonMaterial color={COLORS.woodDark} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      <mesh position={[2.4, 0.62, -3.0]} castShadow>
-        <boxGeometry args={[2.3, 0.2, 1.4]} />
-        <meshToonMaterial color="#c8b090" />
-      </mesh>
-      <mesh position={[1.3, 0.75, -3.0]} castShadow>
-        <boxGeometry args={[0.4, 0.22, 0.8]} />
-        <meshToonMaterial color="#e8dcc8" />
-      </mesh>
-      <mesh position={[1.05, 0.95, -3.0]} castShadow>
-        <boxGeometry args={[0.14, 1.0, 1.6]} />
-        <meshToonMaterial color={COLORS.wood} />
-      </mesh>
-      <mesh position={[-3.2, 0.42, -3.2]} castShadow>
-        <boxGeometry args={[1.3, 0.75, 0.75]} />
-        <meshToonMaterial color={COLORS.wood} />
-        <Outlines color={COLORS.outline} thickness={1} />
-      </mesh>
-      <mesh position={[5.0, 0.42, -3.3]} castShadow>
-        <boxGeometry args={[0.65, 0.75, 0.5]} />
-        <meshToonMaterial color={COLORS.woodDark} />
-      </mesh>
-      <mesh position={[5.0, 0.9, -3.3]}>
-        <cylinderGeometry args={[0.09, 0.11, 0.22, 6]} />
-        <meshToonMaterial color="#f0e8d0" />
-      </mesh>
+      {/* Movable furniture (bed, chairs, kitchen pieces) — positions saved per session */}
+      <CabinMovableFurniture
+        furnitureState={furnitureState}
+        playerTrack={playerTrack}
+      />
+
+      {/* === Fixed stone fireplace (left rear corner) — not movable === */}
+      {(() => {
+        const fx = -W / 2 + 1.55;
+        const fz = -D / 2 + 1.7;
+        return (
+          <group>
+            <mesh position={[fx + 0.35, 0.1, fz + 0.35]} receiveShadow castShadow>
+              <boxGeometry args={[2.6, 0.12, 2.4]} />
+              <meshToonMaterial color={COLORS.stone} />
+              <Outlines color={COLORS.outline} thickness={1} />
+            </mesh>
+            <mesh position={[fx, 1.15, fz]} castShadow receiveShadow>
+              <boxGeometry args={[1.5, 2.2, 1.35]} />
+              <meshToonMaterial color={COLORS.stoneDark} />
+              <Outlines color={COLORS.outline} thickness={1.4} />
+            </mesh>
+            <mesh position={[fx + 0.55, 0.85, fz + 0.35]}>
+              <boxGeometry args={[0.45, 1.0, 0.7]} />
+              <meshToonMaterial color="#1a120c" />
+            </mesh>
+            <mesh position={[fx + 0.35, 0.72, fz + 0.25]}>
+              <boxGeometry args={[0.35, 0.45, 0.4]} />
+              <meshToonMaterial color="#e87830" />
+            </mesh>
+            <mesh position={[fx + 0.32, 0.9, fz + 0.22]}>
+              <boxGeometry args={[0.22, 0.28, 0.22]} />
+              <meshToonMaterial color="#f0c040" />
+            </mesh>
+            <mesh position={[fx + 0.15, 1.55, fz + 0.15]} castShadow>
+              <boxGeometry args={[1.75, 0.12, 1.55]} />
+              <meshToonMaterial color={COLORS.woodDark} />
+            </mesh>
+            <mesh position={[fx - 0.1, 2.7, fz - 0.1]} castShadow>
+              <boxGeometry args={[1.15, 1.4, 1.0]} />
+              <meshToonMaterial color={COLORS.stone} />
+            </mesh>
+          </group>
+        );
+      })()}
 
       {/* Interior ceiling boards (thin) */}
       <mesh position={[0, H - 0.08, 0]} receiveShadow>
@@ -1966,6 +2585,9 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
         <meshToonMaterial color={COLORS.woodDark} />
       </mesh>
 
+      {/* Covered patio behind cabin (full width × 50% depth) */}
+      <CabinBackPatio />
+
       {/* Foundation */}
       <mesh position={[0, 0.1, 0]} receiveShadow>
         <boxGeometry args={[W + 0.5, 0.22, D + 0.5]} />
@@ -1976,33 +2598,41 @@ function LogCabin({ position = [0, 0, 0], rotation = 0, cabinState }) {
   );
 }
 
-/** Single white picket post + board */
-function PicketPanel({ length = 1.2 }) {
+/** Regular picket fence post height (boards); gates use 1.3× this */
+const PICKET_H = 1.1;
+const PICKET_GATE_SCALE = 1.3;
+
+/** Single white picket post + board. scaleY=1 regular fence; 1.3 for gates. */
+function PicketPanel({ length = 1.2, scaleY = 1 }) {
   const posts = Math.max(2, Math.ceil(length / 0.45));
+  const h = PICKET_H * scaleY;
+  const midY = h / 2;
+  const tipY = h + 0.08 * scaleY;
+  const tipH = 0.16 * scaleY;
   return (
     <group>
       {Array.from({ length: posts }).map((_, i) => {
         const x = -length / 2 + (i / (posts - 1)) * length;
         return (
           <group key={i} position={[x, 0, 0]}>
-            <mesh position={[0, 0.55, 0]} castShadow>
-              <boxGeometry args={[0.07, 1.1, 0.07]} />
+            <mesh position={[0, midY, 0]} castShadow>
+              <boxGeometry args={[0.07, h, 0.07]} />
               <meshToonMaterial color={COLORS.white} />
             </mesh>
             {/* Pointed top */}
-            <mesh position={[0, 1.18, 0]} castShadow>
-              <coneGeometry args={[0.055, 0.16, 4]} />
+            <mesh position={[0, tipY, 0]} castShadow>
+              <coneGeometry args={[0.055 * Math.min(1.15, scaleY), tipH, 4]} />
               <meshToonMaterial color={COLORS.white} />
             </mesh>
           </group>
         );
       })}
       {/* Rails */}
-      <mesh position={[0, 0.35, 0]} castShadow>
+      <mesh position={[0, 0.35 * scaleY, 0]} castShadow>
         <boxGeometry args={[length, 0.06, 0.05]} />
         <meshToonMaterial color={COLORS.white} />
       </mesh>
-      <mesh position={[0, 0.75, 0]} castShadow>
+      <mesh position={[0, 0.75 * scaleY, 0]} castShadow>
         <boxGeometry args={[length, 0.06, 0.05]} />
         <meshToonMaterial color={COLORS.white} />
       </mesh>
@@ -2336,50 +2966,53 @@ function CabinYard({ cabinState }) {
         </group>
       ))}
 
-      {/* Gate posts: main double + garden single (hinge + latch) */}
-      {[
-        [-gh, y.front],
-        [gh, y.front],
-        [gx - gh, y.front],
-        [gx + gh, y.front],
-        [gx - gh, -y.back],
-        [gx + gh, -y.back],
-      ].map(([px, pz], i) => (
-        <group key={`gp-${i}`} position={[px, 0, pz]}>
-          <mesh position={[0, 0.6, 0]} castShadow>
-            <boxGeometry args={[0.12, 1.2, 0.12]} />
-            <meshToonMaterial color={white} />
-          </mesh>
-          <mesh position={[0, 1.28, 0]}>
-            <boxGeometry args={[0.16, 0.1, 0.16]} />
-            <meshToonMaterial color={white} />
-          </mesh>
-        </group>
-      ))}
+      {/* Gate posts — 30% taller than regular pickets so openings stand out */}
+      {(() => {
+        const gatePostH = 1.2 * PICKET_GATE_SCALE;
+        return [
+          [-gh, y.front],
+          [gh, y.front],
+          [gx - gh, y.front],
+          [gx + gh, y.front],
+          [gx - gh, -y.back],
+          [gx + gh, -y.back],
+        ].map(([px, pz], i) => (
+          <group key={`gp-${i}`} position={[px, 0, pz]}>
+            <mesh position={[0, gatePostH / 2, 0]} castShadow>
+              <boxGeometry args={[0.12, gatePostH, 0.12]} />
+              <meshToonMaterial color={white} />
+            </mesh>
+            <mesh position={[0, gatePostH + 0.08, 0]}>
+              <boxGeometry args={[0.18, 0.12, 0.18]} />
+              <meshToonMaterial color={white} />
+            </mesh>
+          </group>
+        ));
+      })()}
 
-      {/* Main path gate — double leaves, swing with push direction */}
+      {/* Main path gate — double leaves (taller pickets) */}
       <group ref={leftGateRef} position={[-gh, 0, y.front]}>
         <group position={[gh * 0.85, 0, 0]}>
-          <PicketPanel length={gh * 1.7} />
+          <PicketPanel length={gh * 1.7} scaleY={PICKET_GATE_SCALE} />
         </group>
       </group>
       <group ref={rightGateRef} position={[gh, 0, y.front]}>
         <group position={[-gh * 0.85, 0, 0]}>
-          <PicketPanel length={gh * 1.7} />
+          <PicketPanel length={gh * 1.7} scaleY={PICKET_GATE_SCALE} />
         </group>
       </group>
 
-      {/* Garden front — single swing leaf (hinge left post) */}
+      {/* Garden front — single swing leaf */}
       <group ref={gFrontRef} position={[gx - gh, 0, y.front]}>
         <group position={[gh * 0.95, 0, 0]}>
-          <PicketPanel length={gh * 1.9} />
+          <PicketPanel length={gh * 1.9} scaleY={PICKET_GATE_SCALE} />
         </group>
       </group>
 
-      {/* Garden back — single swing leaf (hinge left post) */}
+      {/* Garden back — single swing leaf */}
       <group ref={gBackRef} position={[gx - gh, 0, -y.back]}>
         <group position={[gh * 0.95, 0, 0]}>
-          <PicketPanel length={gh * 1.9} />
+          <PicketPanel length={gh * 1.9} scaleY={PICKET_GATE_SCALE} />
         </group>
       </group>
     </group>
@@ -2387,23 +3020,38 @@ function CabinYard({ cabinState }) {
 }
 
 /** Cabin + yard (fence, garden, path) as one placed group */
-function CabinHomestead({ cabinState }) {
+function CabinHomestead({ cabinState, furnitureState, playerTrack }) {
   return (
     <group
       position={[CABIN_POS.x, 0, CABIN_POS.z]}
       rotation={[0, CABIN_YAW, 0]}
     >
-      <LogCabin position={[0, 0, 0]} rotation={0} cabinState={cabinState} />
+      <LogCabin
+        position={[0, 0, 0]}
+        rotation={0}
+        cabinState={cabinState}
+        furnitureState={furnitureState}
+        playerTrack={playerTrack}
+      />
       <CabinYard cabinState={cabinState} />
     </group>
   );
 }
 
-export function ValentineTown({ barnDoorState, cabinState }) {
+export function ValentineTown({
+  barnDoorState,
+  cabinState,
+  furnitureState = null,
+  playerTrack = null,
+}) {
   return (
     <group>
       <Barn position={[0, 0, 0]} rotation={0} doorState={barnDoorState} />
-      <CabinHomestead cabinState={cabinState} />
+      <CabinHomestead
+        cabinState={cabinState}
+        furnitureState={furnitureState}
+        playerTrack={playerTrack}
+      />
     </group>
   );
 }

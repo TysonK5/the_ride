@@ -1,11 +1,19 @@
 import { Outlines } from "@react-three/drei";
 import { COLORS } from "../../materials/colors";
-import { planPetPath, followPetPath } from "../../systems/petNav";
+import {
+  planPetPath,
+  followPetPath,
+  petPushAccess,
+  petOpenBarnForMeal,
+  tickPetAccessCooldowns,
+} from "../../systems/petNav";
 
 /**
  * Pet food + water bowls inside the barn — right aisle, near the front
  * so they're obvious as soon as you walk in the main doors.
  * Companion animals (Callie, Cat) visit every 3–5 minutes.
+ * They open barn doors / pen gate / cabin yard gates on the way in,
+ * then pathfind back to the player after drinking.
  *
  * Barn: W=18 (±9), D=12 (±6). Floor dirt sits at y≈0.04.
  */
@@ -20,6 +28,10 @@ export const FEED_DURATION = 30;
 const HALF_MEAL = FEED_DURATION / 2;
 export const BOWL_ARRIVE = 0.65;
 export const BOWL_WALK_SPEED = 5.5;
+/** How close to the player counts as "found them" after a meal */
+export const RETURN_ARRIVE = 2.4;
+/** Replan return path this often while the player moves */
+const RETURN_REPLAN = 1.25;
 
 /**
  * Barn foundation is a solid box (h=0.25 @ y=0.12 → top ≈ 0.245).
@@ -46,8 +58,8 @@ export function nextFeedInterval() {
 
 /**
  * Per-companion hunger / meal state.
- * phase: idle | toFood | eat | toWater | drink
- * path / pathIndex: waypoint route around barn & cabin
+ * phase: idle | toFood | eat | toWater | drink | toPlayer
+ * path / pathIndex: waypoint route around barn, cabin, doors & gates
  */
 export function createFeedState(initialDelayScale = 1) {
   return {
@@ -56,29 +68,96 @@ export function createFeedState(initialDelayScale = 1) {
     phaseT: 0,
     path: null,
     pathIndex: 0,
+    replanT: 0,
   };
 }
 
 function beginPath(feed, st, goalX, goalZ) {
   feed.path = planPetPath(st.pos.x, st.pos.z, goalX, goalZ);
   feed.pathIndex = 0;
+  feed.replanT = 0;
+}
+
+function abortMeal(feed, st, hungerScale = 1) {
+  feed.phase = "idle";
+  feed.phaseT = 0;
+  feed.path = null;
+  feed.pathIndex = 0;
+  feed.replanT = 0;
+  feed.hunger = nextFeedInterval() * hungerScale;
+  st.mode = "walk";
+  st.stopTimer = 0;
 }
 
 /**
- * Drive meal trip. Mutates `st.pos`, `st.yaw`, `st.walkPhase`, `st.mode`.
- * Paths around barn / cabin on the way to bowls.
- * Returns true while the companion is on a meal trip (skip normal follow).
+ * @typedef {object} MealContext
+ * @property {number} [playerX]
+ * @property {number} [playerZ]
+ * @property {object} [barnDoorState]
+ * @property {object} [gateState]
+ * @property {object} [cabinState]
  */
-export function updateCompanionMeal(st, feed, delta, walkSpeed = BOWL_WALK_SPEED) {
+
+/**
+ * Drive meal trip. Mutates `st.pos`, `st.yaw`, `st.walkPhase`, `st.mode`.
+ * Paths around barn / cabin / fences; opens doors & gates on approach.
+ * After drinking, pathfinds back to the player.
+ * Returns true while the companion is on a meal trip (skip normal follow).
+ *
+ * @param {MealContext} [ctx]
+ */
+export function updateCompanionMeal(
+  st,
+  feed,
+  delta,
+  walkSpeed = BOWL_WALK_SPEED,
+  ctx = {}
+) {
   if (!st || !feed) return false;
+
+  const {
+    playerX = st.pos.x,
+    playerZ = st.pos.z,
+    barnDoorState = null,
+    gateState = null,
+    cabinState = null,
+  } = ctx;
+
+  // Remember last position so meal walks can push doors/gates open & closed
+  if (feed._prevX == null) {
+    feed._prevX = st.pos.x;
+    feed._prevZ = st.pos.z;
+  }
+  const prevX = feed._prevX;
+  const prevZ = feed._prevZ;
+
+  const pushAccess = () => {
+    tickPetAccessCooldowns(delta, barnDoorState, cabinState);
+    // Push open/close from movement through every known door & gate
+    petPushAccess(
+      st.pos.x,
+      st.pos.z,
+      prevX,
+      prevZ,
+      barnDoorState,
+      gateState,
+      cabinState
+    );
+    feed._prevX = st.pos.x;
+    feed._prevZ = st.pos.z;
+  };
 
   if (feed.phase === "idle") {
     feed.hunger -= delta;
+    feed._prevX = st.pos.x;
+    feed._prevZ = st.pos.z;
     if (feed.hunger <= 0) {
       feed.phase = "toFood";
       feed.phaseT = 0;
       st.mode = "walk";
       st.stopTimer = 0;
+      // Prefer the front barn doors for the food run
+      petOpenBarnForMeal(barnDoorState);
       beginPath(feed, st, FOOD_STAND.x, FOOD_STAND.z);
     }
     return false;
@@ -94,16 +173,13 @@ export function updateCompanionMeal(st, feed, delta, walkSpeed = BOWL_WALK_SPEED
 
   if (feed.phase === "toFood") {
     feed.phaseT = (feed.phaseT || 0) + delta;
-    if (feed.phaseT > 55) {
-      feed.phase = "idle";
-      feed.phaseT = 0;
-      feed.path = null;
-      feed.hunger = nextFeedInterval() * 0.35;
-      st.mode = "walk";
+    if (feed.phaseT > 60) {
+      abortMeal(feed, st, 0.35);
       return false;
     }
     if (!feed.path) beginPath(feed, st, FOOD_STAND.x, FOOD_STAND.z);
     const arrived = followPetPath(st, feed, delta, walkSpeed, BOWL_ARRIVE);
+    pushAccess();
     if (arrived) {
       feed.phase = "eat";
       feed.phaseT = 0;
@@ -118,6 +194,8 @@ export function updateCompanionMeal(st, feed, delta, walkSpeed = BOWL_WALK_SPEED
     feed.phaseT += delta;
     st.mode = "eat";
     st.walkPhase = 0;
+    feed._prevX = st.pos.x;
+    feed._prevZ = st.pos.z;
     faceBowl(PET_FOOD_BOWL.x, PET_FOOD_BOWL.z);
     if (feed.phaseT >= HALF_MEAL) {
       feed.phase = "toWater";
@@ -131,15 +209,16 @@ export function updateCompanionMeal(st, feed, delta, walkSpeed = BOWL_WALK_SPEED
   if (feed.phase === "toWater") {
     feed.phaseT = (feed.phaseT || 0) + delta;
     if (feed.phaseT > 30) {
-      feed.phase = "idle";
+      feed.phase = "toPlayer";
       feed.phaseT = 0;
-      feed.path = null;
-      feed.hunger = nextFeedInterval();
       st.mode = "walk";
-      return false;
+      petOpenBarnForMeal(barnDoorState);
+      beginPath(feed, st, playerX, playerZ);
+      return true;
     }
     if (!feed.path) beginPath(feed, st, WATER_STAND.x, WATER_STAND.z);
     const arrived = followPetPath(st, feed, delta, walkSpeed, BOWL_ARRIVE);
+    pushAccess();
     if (arrived) {
       feed.phase = "drink";
       feed.phaseT = 0;
@@ -154,15 +233,43 @@ export function updateCompanionMeal(st, feed, delta, walkSpeed = BOWL_WALK_SPEED
     feed.phaseT += delta;
     st.mode = "drink";
     st.walkPhase = 0;
+    feed._prevX = st.pos.x;
+    feed._prevZ = st.pos.z;
     faceBowl(PET_WATER_BOWL.x, PET_WATER_BOWL.z);
     if (feed.phaseT >= HALF_MEAL) {
-      feed.phase = "idle";
+      feed.phase = "toPlayer";
       feed.phaseT = 0;
-      feed.path = null;
-      feed.hunger = nextFeedInterval();
       st.mode = "walk";
       st.stopTimer = 0;
+      petOpenBarnForMeal(barnDoorState);
+      beginPath(feed, st, playerX, playerZ);
     }
+    return true;
+  }
+
+  if (feed.phase === "toPlayer") {
+    feed.phaseT = (feed.phaseT || 0) + delta;
+    feed.replanT = (feed.replanT || 0) + delta;
+
+    if (feed.phaseT > 70) {
+      abortMeal(feed, st, 1);
+      return false;
+    }
+
+    const dx = playerX - st.pos.x;
+    const dz = playerZ - st.pos.z;
+    const dPlayer = Math.hypot(dx, dz);
+    if (dPlayer < RETURN_ARRIVE) {
+      abortMeal(feed, st, 1);
+      return false;
+    }
+
+    if (!feed.path || feed.replanT >= RETURN_REPLAN) {
+      beginPath(feed, st, playerX, playerZ);
+    }
+
+    followPetPath(st, feed, delta, walkSpeed, 0.85);
+    pushAccess();
     return true;
   }
 

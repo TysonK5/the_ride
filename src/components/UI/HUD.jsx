@@ -11,6 +11,7 @@ export function HUD({
 }) {
   const b = settings?.bindings;
   const padOn = !!settings?.gamepadEnabled;
+  const touchOn = !!settings?.touchControlsEnabled;
   const moveHint = b
     ? `${formatKeyCode(b.forward)}/${formatKeyCode(b.left)}/${formatKeyCode(b.back)}/${formatKeyCode(b.right)} move`
     : "WASD move";
@@ -27,6 +28,7 @@ export function HUD({
     ? `${formatKeyCode(b.fly || "Space")}/${formatKeyCode(b.flyDown || "KeyC")} fly`
     : "Space/C fly";
   const padHint = padOn ? " · PS4 pad ok" : "";
+  const touchHint = touchOn ? " · On-screen pad" : "";
 
   if (locked) {
     return (
@@ -35,9 +37,11 @@ export function HUD({
         <div className="hud-bottom">
           {rideHint ? <div className="hud-prompt">{rideHint}</div> : null}
           <div className="hud-controls-hint">
-            {moveHint} · {sprintHint} · {interactHint} · {mountHint} ·{" "}
-            {flyHint} · ESC options
+            {touchOn
+              ? "Left stick move · Right stick look · Face buttons act · Menu options"
+              : `${moveHint} · ${sprintHint} · ${interactHint} · ${mountHint} · ${flyHint} · ESC options`}
             {padHint}
+            {touchHint}
           </div>
         </div>
       </div>
@@ -54,7 +58,7 @@ export function HUD({
           horse across the flats.
         </p>
         <button type="button" className="hud-play-btn" onClick={onPlay}>
-          Click to Play
+          {touchOn ? "Tap to Play" : "Click to Play"}
         </button>
         <button
           type="button"
